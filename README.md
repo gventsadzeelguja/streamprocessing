@@ -2322,18 +2322,7 @@ log.retention.hours=72
 4. Monitor recovery progress
 5. Post-mortem if lag > 1 hour
 
-### C. Training Materials
-- Kafka fundamentals course
-- Debezium documentation
-- Internal architecture guide
-- Troubleshooting playbook
-- On-call procedures
 
-### D. Contact Information
-- **Project Lead**: [Name]
-- **Infrastructure Team**: [Team Email]
-- **BI Team**: [Team Email]
-- **On-Call Rotation**: [PagerDuty]
 
 ## Conclusion
 
