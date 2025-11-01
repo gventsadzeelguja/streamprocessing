@@ -1,2331 +1,2339 @@
-# MongoDB Stream Processing Implementation Guide
-
-## Table of Contents
-1. [Executive Summary](#executive-summary)
-2. [Current State Analysis](#current-state-analysis)
-3. [Technology Evaluation](#technology-evaluation)
-4. [Proposed Architecture](#proposed-architecture)
-5. [Implementation Plan](#implementation-plan)
-6. [Migration Strategy](#migration-strategy)
-7. [Testing & Validation](#testing--validation)
-8. [Monitoring & Observability](#monitoring--observability)
-9. [Risk Mitigation](#risk-mitigation)
-10. [Timeline & Milestones](#timeline--milestones)
+# MongoDB Trigger to Stream Processing Migration Plan
 
 ## Executive Summary
 
-This document outlines the complete implementation strategy for transitioning from MongoDB trigger-based synchronization to a dedicated stream processing solution. The approach ensures zero downtime, no data loss, and improved scalability for Business Intelligence (BI) production readiness.
+This document outlines a comprehensive plan to migrate from MongoDB database triggers to a dedicated stream processing solution for ETL operations. The migration aims to improve scalability, reliability, and observability while ensuring zero data loss during the transition.
 
-## Current State Analysis
+**Current State:** 8 MongoDB triggers across multiple collections handling change events and writing to S3/SQS  
+**Target State:** Robust stream processing architecture with improved monitoring and error handling  
+**Timeline:** 8-12 weeks (Investigation: 2 weeks, Implementation: 6-10 weeks)  
+**Technology Stack:** Node.js/TypeScript  
+**Repository:** New dedicated repository for stream processing services
 
-### Step 1: Document Existing MongoDB Atlas Architecture
-**Duration: 2-3 days**
+---
 
-1. **Inventory Current Atlas Triggers**
-   - List all MongoDB Atlas database triggers
-   - Document trigger functions and their logic
-   - Map Atlas Functions dependencies
-   - Identify trigger types (Database, Authentication, Scheduled)
-   - Document trigger execution contexts and permissions
-   - Review Atlas trigger logs and metrics
+## Table of Contents
 
-2. **Atlas-Specific Performance Baseline**
-   - Measure current trigger execution time
-   - Document Atlas Function compute usage
-   - Review Atlas trigger failure rates
-   - Analyze Atlas metrics and logs
-   - Check rate limits and quotas
+1. [Current Architecture Analysis](#current-architecture-analysis)
+2. [Technology Evaluation](#technology-evaluation)
+3. [Recommended Architecture](#recommended-architecture)
+4. [Detailed Migration Plan](#detailed-migration-plan)
+5. [Risk Mitigation](#risk-mitigation)
+6. [Testing Strategy](#testing-strategy)
+7. [Rollback Plan](#rollback-plan)
 
-3. **Atlas Triggers Pain Points Assessment**
-   - Interview stakeholders (BI, Infrastructure, Development teams)
-   - Document Atlas trigger scalability limitations (1000 triggers limit)
-   - List issues with Atlas trigger debugging
-   - Identify gaps in Atlas monitoring capabilities
-   - Review costs associated with Atlas triggers
+---
+
+## Current Architecture Analysis
+
+### Existing Triggers
+
+| Trigger Name | Database | Collection | Cluster |
+|-------------|----------|------------|---------|
+| aadw_reservationdatafacilities_v3 | Facilitron_Prod | aaDW_ReservationDataFacilities_v3 | None (Primary) |
+| reservation_charges_etl | Facilitron_Prod | reservation_charges | Production-Copy |
+| reservation_objs_etl | Facilitron_Prod | reservation_objs | Production-Copy |
+| reservation_payments_etl | Facilitron_Prod | reservation_payments | Production-Copy |
+| users_etl | Facilitron_common | users | DevelopmentCluster |
+| owners_etl | Facilitron_common | owners | DevelopmentCluster |
+| reservations_etl | Facilitron_Prod | reservations | None (Primary) |
+
+### Current Flow
+
+```
+MongoDB Change Event → Trigger Function → S3 (document chunks) → SQS Message → ETL Processing
+```
+
+### Current Limitations
+
+1. **Scalability Issues**
+   - Triggers run in MongoDB Atlas environment with resource constraints
+   - Limited to 4MB S3 object size (Stitch limitation)
+   - No built-in batching or throughput optimization
+   - Limited to 10 console.log calls per trigger execution
+
+2. **Reliability Concerns**
+   - No automatic retry mechanism beyond basic trigger retry
+   - Limited error handling and dead letter queue support
+   - Difficult to replay events or handle backpressure
+   - Event ordering only within single document changes
+
+3. **Observability Gaps**
+   - Limited logging (10 log statements max)
+   - No detailed metrics on processing time, failures, or throughput
+   - Difficult to trace end-to-end data flow
+   - No alerting on processing delays
+
+4. **Operational Complexity**
+   - Code changes require manual deployment through Atlas UI
+   - No version control integration (mentioned but disabled)
+   - Testing in production environment is risky
+   - Difficult to debug issues in real-time
+
+5. **Cost Implications**
+   - Trigger executions are metered by MongoDB Atlas
+   - Inefficient for high-volume collections
+   - Multiple S3 PUT operations for large documents
+
+---
 
 ## Technology Evaluation
 
-### Step 2: Evaluate Stream Processing Options
-**Duration: 3-4 days**
+### Option 1: MongoDB Change Streams (Native)
 
-#### MongoDB Change Streams (Atlas Compatible)
-**Pros:**
-- Native MongoDB integration with Atlas
-- Real-time change capture
-- Resumable operations with resume tokens
-- No additional infrastructure for basic use
-- Direct integration with Atlas clusters
-- Built-in connection pooling and retry logic
+#### Overview
+MongoDB Change Streams provide a native way to watch for changes in collections, databases, or entire deployments in real-time.
 
-**Cons:**
-- Limited to MongoDB 3.6+ (Atlas supports this)
-- Memory constraints for large operations
-- 1000 maximum change stream connections per Atlas cluster
-- Limited transformation capabilities compared to dedicated stream processors
-- Atlas network traffic costs for change streams
+#### Architecture
+```
+MongoDB Change Stream → Application Consumer → S3 → SQS → ETL
+```
 
-**Implementation Considerations:**
-```javascript
-// JavaScript/Node.js Change Stream setup with Atlas
-const { MongoClient } = require('mongodb');
+#### Pros
+✅ **Native MongoDB integration** - No external dependencies  
+✅ **Resume tokens** - Built-in mechanism for exactly-once processing  
+✅ **Ordered delivery** - Maintains order of changes per document  
+✅ **Filtering capabilities** - Can filter at database level  
+✅ **Lower latency** - Direct connection to MongoDB  
+✅ **No additional infrastructure** - Uses existing MongoDB cluster  
+✅ **Cost-effective** - No additional streaming platform costs  
 
-class AtlasChangeStreamProcessor {
-  constructor(connectionString, dbName, collectionName) {
-    this.client = new MongoClient(connectionString, {
-      useUnifiedTopology: true,
-      maxPoolSize: 10
+#### Cons
+❌ **No built-in buffering** - Application must handle buffering  
+❌ **Single point of failure** - If consumer goes down, must handle resume  
+❌ **Scaling complexity** - Need to implement sharding logic for multiple consumers  
+❌ **No native dead letter queue** - Must implement error handling  
+❌ **Connection management** - Application responsible for connection health  
+❌ **Limited transformation** - All processing in application code  
+
+#### Best For
+- Lower volume collections (<1000 changes/second)
+- When minimal external dependencies are desired
+- When cost optimization is critical
+- Development/staging environments
+
+#### Implementation Complexity
+**Medium** - Requires building robust consumer application with error handling, resumption logic, and monitoring.
+
+#### Estimated Cost
+**Low** - Only compute costs for consumer application (~$50-100/month for EC2/ECS)
+
+---
+
+### Option 2: Apache Kafka + MongoDB Connector
+
+#### Overview
+Use Confluent/Debezium MongoDB Connector to stream changes to Kafka, then process with Kafka consumers.
+
+#### Architecture
+```
+MongoDB → Kafka Connect (MongoDB Connector) → Kafka Topics → Consumer Application → S3 → SQS → ETL
+```
+
+#### Pros
+✅ **Industry standard** - Mature ecosystem and tooling  
+✅ **High throughput** - Can handle millions of events per second  
+✅ **Durability** - Built-in replication and persistence  
+✅ **Exactly-once semantics** - With proper configuration  
+✅ **Rich ecosystem** - Kafka Streams, KSQL, Schema Registry  
+✅ **Multiple consumers** - Easy to fan out to multiple processing pipelines  
+✅ **Monitoring tools** - Extensive metrics and monitoring options  
+✅ **Replay capability** - Can replay historical events  
+✅ **Transformation options** - Can use Kafka Streams for pre-processing  
+
+#### Cons
+❌ **Operational complexity** - Requires Kafka cluster management  
+❌ **Infrastructure overhead** - Need ZooKeeper (or KRaft), brokers, Connect workers  
+❌ **Higher latency** - Additional hop through Kafka adds ~10-50ms  
+❌ **Cost** - MSK or self-managed Kafka can be expensive ($500-2000+/month)  
+❌ **Learning curve** - Team needs Kafka expertise  
+❌ **Network overhead** - Data moves: MongoDB → Kafka → Consumers  
+
+#### Best For
+- High volume collections (>1000 changes/second)
+- When you need multiple downstream consumers
+- When replay and historical analysis are important
+- Organizations with existing Kafka infrastructure
+- When complex stream processing is needed
+
+#### Implementation Complexity
+**High** - Requires Kafka cluster setup, connector configuration, monitoring setup, and operational expertise.
+
+#### Estimated Cost
+**High** - MSK cluster: $600-2000/month (3 brokers, m5.large) + data transfer costs
+
+---
+
+### Option 3: AWS Kinesis Data Streams
+
+#### Overview
+AWS-native streaming service with MongoDB change stream integration via custom application or Lambda.
+
+#### Architecture
+```
+MongoDB Change Stream → Lambda/ECS Producer → Kinesis Stream → Lambda/ECS Consumer → S3 → SQS → ETL
+```
+
+#### Pros
+✅ **Fully managed** - AWS handles infrastructure  
+✅ **AWS native** - Integrates seamlessly with S3, SQS, Lambda, CloudWatch  
+✅ **Auto-scaling** - On-demand or provisioned capacity with auto-scaling  
+✅ **Built-in monitoring** - CloudWatch metrics and dashboards  
+✅ **Multiple consumers** - Enhanced fan-out for parallel processing  
+✅ **Retention** - Data retention up to 365 days  
+✅ **Low operational overhead** - No cluster management  
+✅ **Exactly-once processing** - With Kinesis enhanced fan-out and checkpointing  
+✅ **Encryption at rest and in transit** - Built-in security features  
+
+#### Cons
+❌ **AWS lock-in** - Tied to AWS ecosystem  
+❌ **Cost at scale** - Can be expensive for high throughput (shard-hour pricing)  
+❌ **Shard management** - May need to manage shard splitting/merging  
+❌ **2MB record limit** - Smaller than Kafka (10MB default)  
+❌ **Less flexible** - Fewer transformation options than Kafka Streams  
+❌ **Learning curve** - Kinesis-specific concepts (shards, enhanced fan-out)  
+
+#### Best For
+- AWS-centric architecture
+- When operational simplicity is paramount
+- Medium to high volume workloads
+- When tight AWS service integration is beneficial
+- Organizations without stream processing expertise
+
+#### Implementation Complexity
+**Medium** - Requires Lambda or ECS setup, IAM configuration, and monitoring. AWS manages infrastructure.
+
+#### Estimated Cost
+**Medium** - On-demand: ~$0.015 per 1M records + $0.040 per GB. Estimated $300-800/month for medium volume.
+
+---
+
+### Option 4: AWS Kinesis Data Firehose (Simplified)
+
+#### Overview
+Fully managed service to deliver streaming data directly to S3, with optional Lambda transformation.
+
+#### Architecture
+```
+MongoDB Change Stream → Lambda Producer → Kinesis Firehose → S3 (with buffering) → S3 Event → Lambda → SQS
+```
+
+#### Pros
+✅ **Simplest AWS option** - Minimal configuration  
+✅ **Direct S3 delivery** - Automatic batching and delivery  
+✅ **Built-in transformation** - Lambda transformation built-in  
+✅ **Auto-scaling** - No capacity planning needed  
+✅ **Cost-effective** - Pay only for data volume  
+✅ **Format conversion** - Can convert to Parquet/ORC for BI  
+✅ **Buffer optimization** - Automatic batching reduces S3 operations  
+
+#### Cons
+❌ **Limited consumers** - Only delivers to specific destinations  
+❌ **Less flexible** - Cannot easily add multiple processing pipelines  
+❌ **Latency** - Buffering introduces 60+ second delay  
+❌ **No replay** - Cannot reprocess historical data  
+❌ **Limited routing** - Cannot route different events to different destinations  
+
+#### Best For
+- Simple S3 delivery use case
+- When latency requirements are relaxed (>60 seconds acceptable)
+- Cost-sensitive deployments
+- When you want minimal operational overhead
+
+#### Implementation Complexity
+**Low** - Simplest to implement and maintain.
+
+#### Estimated Cost
+**Low** - ~$0.029 per GB. Estimated $100-300/month for medium volume.
+
+---
+
+## Recommended Architecture
+
+### Primary Recommendation: AWS Kinesis Data Streams
+
+#### Rationale
+
+After evaluating all options, **AWS Kinesis Data Streams** is recommended as the optimal solution for the following reasons:
+
+1. **AWS Native Integration** - Your existing infrastructure uses S3 and SQS (AWS services), making Kinesis a natural fit
+2. **Managed Service** - Reduces operational burden compared to Kafka while maintaining reliability
+3. **Scalability** - Handles current and future volume requirements with on-demand capacity
+4. **Cost Balance** - More affordable than Kafka, with better features than basic Change Streams
+5. **BI Requirements** - Built-in integration with analytics services for future BI needs
+6. **Team Skillset** - Lower learning curve than Kafka for AWS-familiar teams
+
+#### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         MongoDB Atlas                                │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │
+│  │ Facilitron   │  │ Facilitron   │  │ Development  │              │
+│  │ _Prod        │  │ _common      │  │ Cluster      │              │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘              │
+│         │                  │                  │                       │
+└─────────┼──────────────────┼──────────────────┼───────────────────────┘
+          │                  │                  │
+          └──────────────────┴──────────────────┘
+                             │
+                  ┌──────────▼──────────┐
+                  │  Change Stream      │
+                  │  Consumer (ECS)     │
+                  │  - Resilient        │
+                  │  - Multi-threaded   │
+                  │  - Resume tokens    │
+                  └──────────┬──────────┘
+                             │
+                  ┌──────────▼──────────┐
+                  │  Kinesis Data       │
+                  │  Streams            │
+                  │  - Per collection   │
+                  │  - On-demand mode   │
+                  │  - 24hr retention   │
+                  └──────────┬──────────┘
+                             │
+          ┌──────────────────┴──────────────────┐
+          │                                      │
+┌─────────▼─────────┐                 ┌─────────▼─────────┐
+│  Kinesis Consumer │                 │  Kinesis Consumer │
+│  Application      │                 │  Application      │
+│  (ECS Fargate)    │                 │  (Lambda - Future)│
+│  - Batch process  │                 │  - BI Processing  │
+│  - Checkpointing  │                 │  - Analytics      │
+│  - Error handling │                 │                   │
+└─────────┬─────────┘                 └───────────────────┘
+          │
+          ├─────────────┬─────────────┐
+          │             │             │
+┌─────────▼────┐ ┌──────▼──────┐ ┌───▼─────┐
+│ S3 Bucket    │ │ SQS Queue   │ │ DLQ     │
+│ (ETL Data)   │ │ (Existing)  │ │ (Errors)│
+└──────────────┘ └─────────────┘ └─────────┘
+```
+
+#### Key Components
+
+1. **Change Stream Consumer (ECS Service)**
+   - Dockerized application running on ECS Fargate
+   - Connects to MongoDB Change Streams for each collection
+   - Handles resume tokens for fault tolerance
+   - Writes to appropriate Kinesis stream per collection
+
+2. **Kinesis Data Streams**
+   - One stream per collection (or logical grouping)
+   - On-demand capacity mode (auto-scales)
+   - 24-hour retention (sufficient for recovery)
+   - CloudWatch metrics enabled
+
+3. **Kinesis Consumer Application (ECS/Fargate)**
+   - Processes events in batches
+   - Handles document chunking (4MB limit)
+   - Writes to S3 and sends SQS messages
+   - Uses DynamoDB for checkpointing (via KCL)
+   - Implements retry logic with exponential backoff
+
+4. **Dead Letter Queue (DLQ)**
+   - Captures failed events for manual review
+   - CloudWatch alarms for DLQ depth
+   - Replay mechanism for corrected events
+
+---
+
+## Code Implementation Examples
+
+This section provides production-ready Node.js/TypeScript code examples for the stream processing service.
+
+### Repository Structure
+
+```
+stream-processing-service/
+├── packages/
+│   ├── change-stream-consumer/
+│   │   ├── src/
+│   │   │   ├── index.ts
+│   │   │   ├── mongodb-client.ts
+│   │   │   ├── kinesis-producer.ts
+│   │   │   └── config.ts
+│   │   ├── tests/
+│   │   ├── Dockerfile
+│   │   └── package.json
+│   ├── kinesis-consumer/
+│   │   ├── src/
+│   │   │   ├── index.ts
+│   │   │   ├── kinesis-client.ts
+│   │   │   ├── s3-writer.ts
+│   │   │   ├── sqs-sender.ts
+│   │   │   └── config.ts
+│   │   ├── tests/
+│   │   ├── Dockerfile
+│   │   └── package.json
+│   └── shared/
+│       ├── src/
+│       │   ├── types.ts
+│       │   ├── logger.ts
+│       │   └── metrics.ts
+│       └── package.json
+├── infrastructure/
+│   ├── terraform/
+│   └── cloudformation/
+├── scripts/
+│   └── validation/
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+### 1. Change Stream Consumer
+
+**packages/change-stream-consumer/src/index.ts**
+```typescript
+import { MongoClient, ChangeStreamDocument } from 'mongodb';
+import { KinesisProducer } from './kinesis-producer';
+import { logger } from '@shared/logger';
+import { publishMetric } from '@shared/metrics';
+import config from './config';
+
+interface CollectionConfig {
+  database: string;
+  collection: string;
+  streamName: string;
+}
+
+class ChangeStreamConsumer {
+  private mongoClient: MongoClient;
+  private kinesisProducer: KinesisProducer;
+  private isShuttingDown = false;
+
+  constructor() {
+    this.mongoClient = new MongoClient(config.mongoUri, {
+      maxPoolSize: 10,
+      minPoolSize: 5,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
     });
-    this.dbName = dbName;
-    this.collectionName = collectionName;
-    this.resumeToken = null;
+    this.kinesisProducer = new KinesisProducer();
   }
 
   async start() {
-    await this.client.connect();
-    const db = this.client.db(this.dbName);
-    const collection = db.collection(this.collectionName);
+    try {
+      await this.mongoClient.connect();
+      logger.info('Connected to MongoDB');
 
-    const pipeline = [
-      { 
-        $match: { 
-          'fullDocument.status': 'active',
-          'operationType': { $in: ['insert', 'update', 'replace'] }
-        } 
-      },
-      { 
-        $project: { 
-          'fullDocument.sensitiveData': 0 
-        } 
+      // Health check endpoint
+      this.startHealthCheck();
+
+      // Watch each collection
+      for (const collection of config.collections) {
+        this.watchCollection(collection);
       }
-    ];
 
-    const options = {
+      // Graceful shutdown
+      process.on('SIGTERM', () => this.shutdown());
+      process.on('SIGINT', () => this.shutdown());
+
+    } catch (error) {
+      logger.error('Failed to start consumer', { error });
+      throw error;
+    }
+  }
+
+  private async watchCollection(collectionConfig: CollectionConfig) {
+    const { database, collection, streamName } = collectionConfig;
+    const db = this.mongoClient.db(database);
+    const coll = db.collection(collection);
+
+    logger.info('Starting watch', { database, collection, streamName });
+
+    const changeStream = coll.watch([], {
       fullDocument: 'updateLookup',
-      resumeAfter: this.resumeToken,
-      maxAwaitTimeMS: 10000,
-      batchSize: 100
-    };
+      maxAwaitTimeMS: 1000,
+    });
 
-    const changeStream = collection.watch(pipeline, options);
-    
-    changeStream.on('change', async (change) => {
+    changeStream.on('change', async (change: ChangeStreamDocument) => {
+      if (this.isShuttingDown) return;
+
       try {
-        await this.processChange(change);
-        this.resumeToken = change._id;
-        await this.saveResumeToken(this.resumeToken);
+        const startTime = Date.now();
+        
+        await this.processChange(change, streamName);
+
+        const duration = Date.now() - startTime;
+        publishMetric('ChangeProcessed', 1, { collection, streamName });
+        publishMetric('ProcessingDuration', duration, { collection, streamName });
+
       } catch (error) {
-        console.error('Error processing change:', error);
-        await this.handleError(error, change);
+        logger.error('Error processing change', {
+          error,
+          collection,
+          changeId: change._id,
+        });
+        publishMetric('ProcessingError', 1, { collection, streamName });
       }
     });
 
-    changeStream.on('error', async (error) => {
-      console.error('Change stream error:', error);
-      await this.reconnect();
+    changeStream.on('error', (error) => {
+      logger.error('Change stream error', { error, collection });
+      publishMetric('ChangeStreamError', 1, { collection, streamName });
+      
+      // Implement exponential backoff retry
+      this.retryWatchCollection(collectionConfig);
     });
   }
 
-  async processChange(change) {
-    // Process the change event
-    console.log('Processing change:', change.operationType);
+  private async processChange(
+    change: ChangeStreamDocument,
+    streamName: string
+  ) {
+    const { operationType, documentKey, fullDocument } = change;
+
+    // Filter operations
+    if (!['insert', 'update', 'replace', 'delete'].includes(operationType)) {
+      return;
+    }
+
+    const record = {
+      operationType,
+      documentKey,
+      fullDocument: fullDocument || documentKey,
+      timestamp: new Date().toISOString(),
+      collection: change.ns.coll,
+      database: change.ns.db,
+    };
+
+    // Send to Kinesis
+    await this.kinesisProducer.putRecord(streamName, record, documentKey._id);
+
+    logger.debug('Change processed', {
+      operationType,
+      documentId: documentKey._id,
+      streamName,
+    });
   }
 
-  async saveResumeToken(token) {
-    // Save token to persistent storage for recovery
+  private async retryWatchCollection(
+    collectionConfig: CollectionConfig,
+    attempt = 1
+  ) {
+    const backoffMs = Math.min(1000 * Math.pow(2, attempt), 30000);
+    
+    logger.info('Retrying watch after backoff', {
+      collection: collectionConfig.collection,
+      attempt,
+      backoffMs,
+    });
+
+    await new Promise(resolve => setTimeout(resolve, backoffMs));
+
+    if (!this.isShuttingDown) {
+      this.watchCollection(collectionConfig);
+    }
   }
 
-  async handleError(error, change) {
-    // Implement error handling logic
-  }
+  private startHealthCheck() {
+    const express = require('express');
+    const app = express();
 
-  async reconnect() {
-    // Implement reconnection logic with exponential backoff
-  }
-}
-```
-
-#### Apache Kafka + Kafka Connect
-**Pros:**
-- Industry standard for stream processing
-- High throughput and scalability
-- Rich ecosystem (Kafka Streams, KSQL)
-- Built-in fault tolerance
-- Multiple consumer support
-
-**Cons:**
-- Complex infrastructure requirements
-- Operational overhead
-- Steep learning curve
-- Additional cost
-
-**Implementation Considerations:**
-- MongoDB Kafka Connector for source
-- Custom transformations via Kafka Streams
-- Schema Registry for data governance
-
-#### AWS Kinesis Data Streams
-**Pros:**
-- Managed service (less operational overhead)
-- AWS ecosystem integration
-- Auto-scaling capabilities
-- Cost-effective for AWS environments
-
-**Cons:**
-- AWS vendor lock-in
-- Limited compared to Kafka features
-- Regional availability considerations
-- Less community support
-
-#### Debezium + Kafka
-**Pros:**
-- Purpose-built for CDC (Change Data Capture)
-- MongoDB connector available
-- Schema evolution support
-- Transaction support
-
-**Cons:**
-- Additional component to manage
-- Requires Kafka infrastructure
-- Complex initial setup
-
-### Step 3: Technology Selection Matrix
-**Duration: 1 day**
-
-| Criteria | Weight | Change Streams | Kafka | Kinesis | Debezium |
-|----------|--------|---------------|-------|---------|----------|
-| Scalability | 25% | 7 | 10 | 9 | 9 |
-| Reliability | 25% | 8 | 10 | 9 | 10 |
-| Complexity | 20% | 9 | 6 | 7 | 5 |
-| Cost | 15% | 10 | 6 | 7 | 6 |
-| Ecosystem | 15% | 6 | 10 | 8 | 9 |
-
-**Recommendation**: Kafka + Debezium for enterprise-grade solution, MongoDB Change Streams for quick wins
-
-## MongoDB Atlas Triggers Analysis
-
-### Step 3.5: Atlas Triggers Migration Planning
-**Duration: 2 days**
-
-#### Current Atlas Triggers Types
-
-1. **Database Triggers**
-```javascript
-// Example Atlas Database Trigger Function
-exports = async function(changeEvent) {
-  const { operationType, fullDocument, ns } = changeEvent;
-  
-  // Get Atlas App Services context
-  const collection = context.services
-    .get("mongodb-atlas")
-    .db(ns.db)
-    .collection("audit_log");
-  
-  // Process based on operation type
-  switch(operationType) {
-    case 'insert':
-      await handleInsert(fullDocument);
-      break;
-    case 'update':
-      await handleUpdate(changeEvent);
-      break;
-    case 'delete':
-      await handleDelete(changeEvent);
-      break;
-  }
-  
-  // Log to audit collection
-  await collection.insertOne({
-    timestamp: new Date(),
-    operation: operationType,
-    documentId: changeEvent.documentKey._id,
-    processedBy: 'atlas-trigger'
-  });
-};
-
-async function handleInsert(document) {
-  // Sync to BI warehouse via Atlas HTTP service
-  const response = await context.http.post({
-    url: "https://bi-warehouse.example.com/api/sync",
-    headers: {
-      "Authorization": [`Bearer ${context.values.get("BI_API_KEY")}`],
-      "Content-Type": ["application/json"]
-    },
-    body: JSON.stringify(document)
-  });
-  
-  if (response.statusCode !== 200) {
-    throw new Error(`BI sync failed: ${response.body.text()}`);
-  }
-}
-```
-
-2. **Scheduled Triggers**
-```javascript
-// Atlas Scheduled Trigger for batch processing
-exports = async function() {
-  const mongodb = context.services.get("mongodb-atlas");
-  const db = mongodb.db("production");
-  
-  // Get records modified in last hour
-  const lastHour = new Date(Date.now() - 60 * 60 * 1000);
-  
-  const records = await db.collection("transactions")
-    .find({ 
-      modifiedAt: { $gte: lastHour },
-      processed: false 
-    })
-    .toArray();
-  
-  // Batch process records
-  const batchSize = 100;
-  for (let i = 0; i < records.length; i += batchSize) {
-    const batch = records.slice(i, i + batchSize);
-    await processBatch(batch);
-  }
-};
-```
-
-3. **Authentication Triggers**
-```javascript
-// Atlas Authentication Trigger
-exports = async function(authEvent) {
-  const { user, time, type } = authEvent;
-  
-  if (type === "LOGIN") {
-    // Log user login
-    await context.services.get("mongodb-atlas")
-      .db("auth")
-      .collection("login_history")
-      .insertOne({
-        userId: user.id,
-        email: user.data.email,
-        timestamp: time,
-        ip: context.request.remoteIPAddress
+    app.get('/health', (req, res) => {
+      const isHealthy = this.mongoClient && !this.isShuttingDown;
+      res.status(isHealthy ? 200 : 503).json({
+        status: isHealthy ? 'healthy' : 'unhealthy',
+        timestamp: new Date().toISOString(),
       });
+    });
+
+    app.listen(config.healthCheckPort, () => {
+      logger.info(`Health check listening on port ${config.healthCheckPort}`);
+    });
   }
-};
-```
 
-#### Atlas Triggers to Stream Processing Mapping
+  private async shutdown() {
+    logger.info('Shutting down gracefully...');
+    this.isShuttingDown = true;
 
-| Atlas Trigger Type | Stream Processing Equivalent | Migration Complexity |
-|-------------------|----------------------------|---------------------|
-| Database Triggers | Change Streams + Kafka | Medium |
-| Scheduled Triggers | Kafka Streams Windowing | High |
-| Authentication Triggers | Separate Auth Service | Low |
-| HTTPS Endpoints | API Gateway + Kafka | Medium |
+    await this.mongoClient.close();
+    await this.kinesisProducer.close();
 
-#### Migration Strategy from Atlas Triggers
-
-1. **Inventory Phase**
-```javascript
-// Script to export all Atlas triggers configuration
-const { App } = require('realm-web');
-
-async function exportAtlasTriggers() {
-  const app = new App({ id: process.env.ATLAS_APP_ID });
-  const credentials = Realm.Credentials.apiKey(process.env.ATLAS_API_KEY);
-  await app.logIn(credentials);
-  
-  // Fetch all triggers
-  const triggers = await app.functions.listTriggers();
-  
-  const triggerConfigs = triggers.map(trigger => ({
-    name: trigger.name,
-    type: trigger.type,
-    config: trigger.config,
-    functionSource: trigger.function_source,
-    disabled: trigger.disabled
-  }));
-  
-  // Save configurations for migration
-  require('fs').writeFileSync(
-    'atlas-triggers-backup.json',
-    JSON.stringify(triggerConfigs, null, 2)
-  );
-  
-  return triggerConfigs;
+    logger.info('Shutdown complete');
+    process.exit(0);
+  }
 }
+
+// Start the consumer
+const consumer = new ChangeStreamConsumer();
+consumer.start().catch((error) => {
+  logger.error('Fatal error', { error });
+  process.exit(1);
+});
 ```
 
-2. **Parallel Implementation**
-```javascript
-// Wrapper to run both Atlas triggers and new stream processing in parallel
-class DualModeProcessor {
+**packages/change-stream-consumer/src/kinesis-producer.ts**
+```typescript
+import { Kinesis } from 'aws-sdk';
+import { logger } from '@shared/logger';
+import config from './config';
+
+export class KinesisProducer {
+  private kinesis: Kinesis;
+  private buffer: Map<string, any[]>;
+  private flushInterval: NodeJS.Timeout;
+
   constructor() {
-    this.atlasEnabled = true;
-    this.streamEnabled = false;
-    this.validationMode = true;
-  }
-  
-  async processChange(change) {
-    const results = [];
-    
-    // Process through Atlas trigger (existing)
-    if (this.atlasEnabled) {
-      results.push(await this.processViaAtlas(change));
-    }
-    
-    // Process through new stream pipeline
-    if (this.streamEnabled) {
-      results.push(await this.processViaStream(change));
-    }
-    
-    // Validate results match in validation mode
-    if (this.validationMode && results.length === 2) {
-      await this.validateResults(results[0], results[1], change);
-    }
-    
-    return results[0] || results[1];
-  }
-  
-  async validateResults(atlasResult, streamResult, originalChange) {
-    const differences = this.compareResults(atlasResult, streamResult);
-    
-    if (differences.length > 0) {
-      await this.logDiscrepancy({
-        changeId: originalChange._id,
-        differences,
-        atlasResult,
-        streamResult,
-        timestamp: new Date()
-      });
-    }
-    
-    // Track validation metrics
-    await this.updateMetrics({
-      total: 1,
-      matching: differences.length === 0 ? 1 : 0
+    this.kinesis = new Kinesis({
+      region: config.awsRegion,
+      maxRetries: 3,
+      httpOptions: { timeout: 30000 },
     });
+    this.buffer = new Map();
+
+    // Flush buffer every 1 second or when it reaches size limit
+    this.flushInterval = setInterval(() => this.flush(), 1000);
+  }
+
+  async putRecord(streamName: string, data: any, partitionKey: string) {
+    // Add to buffer
+    if (!this.buffer.has(streamName)) {
+      this.buffer.set(streamName, []);
+    }
+
+    this.buffer.get(streamName)!.push({
+      Data: JSON.stringify(data),
+      PartitionKey: partitionKey.toString(),
+    });
+
+    // Flush if buffer is large enough
+    if (this.buffer.get(streamName)!.length >= config.kinesisBufferSize) {
+      await this.flushStream(streamName);
+    }
+  }
+
+  private async flush() {
+    for (const streamName of this.buffer.keys()) {
+      await this.flushStream(streamName);
+    }
+  }
+
+  private async flushStream(streamName: string) {
+    const records = this.buffer.get(streamName);
+    if (!records || records.length === 0) return;
+
+    this.buffer.set(streamName, []); // Clear buffer
+
+    try {
+      // Batch write to Kinesis (up to 500 records)
+      const chunks = this.chunkArray(records, 500);
+      
+      for (const chunk of chunks) {
+        await this.putRecordsWithRetry(streamName, chunk);
+      }
+
+      logger.debug('Flushed records to Kinesis', {
+        streamName,
+        count: records.length,
+      });
+
+    } catch (error) {
+      logger.error('Failed to flush to Kinesis', {
+        error,
+        streamName,
+        recordCount: records.length,
+      });
+      // Re-add to buffer for retry
+      this.buffer.set(streamName, [
+        ...records,
+        ...(this.buffer.get(streamName) || []),
+      ]);
+      throw error;
+    }
+  }
+
+  private async putRecordsWithRetry(
+    streamName: string,
+    records: any[],
+    attempt = 1
+  ): Promise<void> {
+    try {
+      const result = await this.kinesis
+        .putRecords({
+          StreamName: streamName,
+          Records: records,
+        })
+        .promise();
+
+      // Handle partial failures
+      if (result.FailedRecordCount && result.FailedRecordCount > 0) {
+        const failedRecords = records.filter(
+          (_, index) => result.Records[index].ErrorCode
+        );
+
+        if (attempt < config.maxRetries) {
+          const backoffMs = Math.min(100 * Math.pow(2, attempt), 5000);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+          return this.putRecordsWithRetry(streamName, failedRecords, attempt + 1);
+        } else {
+          throw new Error(
+            `Failed to write ${result.FailedRecordCount} records after ${attempt} attempts`
+          );
+        }
+      }
+    } catch (error) {
+      if (attempt < config.maxRetries) {
+        const backoffMs = Math.min(100 * Math.pow(2, attempt), 5000);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        return this.putRecordsWithRetry(streamName, records, attempt + 1);
+      }
+      throw error;
+    }
+  }
+
+  private chunkArray<T>(array: T[], size: number): T[][] {
+    const chunks: T[][] = [];
+    for (let i = 0; i < array.length; i += size) {
+      chunks.push(array.slice(i, i + size));
+    }
+    return chunks;
+  }
+
+  async close() {
+    clearInterval(this.flushInterval);
+    await this.flush();
   }
 }
 ```
 
-## Proposed Architecture
+### 2. Kinesis Consumer
 
-### Step 4: Design Target Architecture
-**Duration: 3-4 days**
+**packages/kinesis-consumer/src/index.ts**
+```typescript
+import { S3Writer } from './s3-writer';
+import { SQSSender } from './sqs-sender';
+import { logger } from '@shared/logger';
+import { publishMetric } from '@shared/metrics';
+import config from './config';
 
-```mermaid
-graph LR
-    A[MongoDB Primary] --> B[Debezium Connector]
-    B --> C[Kafka Cluster]
-    C --> D[Stream Processor]
-    D --> E[Target Systems]
-    D --> F[BI Data Warehouse]
-    C --> G[Dead Letter Queue]
-    D --> H[Monitoring/Alerting]
-```
+const {
+  KinesisClient,
+  GetShardIteratorCommand,
+  GetRecordsCommand,
+  DescribeStreamCommand,
+} = require('@aws-sdk/client-kinesis');
 
-#### Core Components
+class KinesisConsumerApp {
+  private kinesisClient: KinesisClient;
+  private s3Writer: S3Writer;
+  private sqsSender: SQSSender;
+  private checkpoints: Map<string, string>;
+  private isRunning = false;
 
-1. **Source Layer**
-   - MongoDB replica set (existing)
-   - Debezium MongoDB connector
-   - Connection pooling configuration
-
-2. **Message Broker Layer**
-   - Kafka cluster (3+ brokers for HA)
-   - Topic strategy (one per collection or logical grouping)
-   - Partition strategy for parallelism
-   - Retention policies
-
-3. **Processing Layer**
-   - Kafka Streams applications for transformations
-   - Error handling and retry logic
-   - State stores for aggregations
-
-4. **Sink Layer**
-   - Target database connectors
-   - BI warehouse sink
-   - Batch vs. streaming decisions
-
-5. **Observability Layer**
-   - Prometheus + Grafana for metrics
-   - ELK stack for log aggregation
-   - Custom dashboards for business metrics
-
-## Implementation Plan
-
-### Phase 1: Environment Setup
-**Duration: 1 week**
-
-#### Step 5: Development Environment
-1. **Set up Node.js project**
-   ```bash
-   # Initialize Node.js project
-   npm init -y
-   
-   # Install required dependencies
-   npm install mongodb kafkajs @aws-sdk/client-kinesis
-   npm install --save-dev jest @types/node nodemon dotenv
-   
-   # Project structure
-   mkdir -p src/{processors,connectors,validators,utils}
-   mkdir -p config tests scripts
-   ```
-
-2. **Environment Configuration**
-   ```javascript
-   // config/development.js
-   module.exports = {
-     mongodb: {
-       // Atlas connection string
-       uri: process.env.MONGODB_ATLAS_URI || 'mongodb+srv://user:pass@cluster.mongodb.net',
-       options: {
-         useUnifiedTopology: true,
-         maxPoolSize: 50,
-         wtimeoutMS: 2500,
-         serverSelectionTimeoutMS: 5000,
-       }
-     },
-     kafka: {
-       brokers: (process.env.KAFKA_BROKERS || 'localhost:9092').split(','),
-       clientId: 'stream-processor',
-       connectionTimeout: 10000,
-       requestTimeout: 30000,
-       ssl: process.env.KAFKA_SSL === 'true',
-       sasl: process.env.KAFKA_SASL ? {
-         mechanism: 'scram-sha-512',
-         username: process.env.KAFKA_USERNAME,
-         password: process.env.KAFKA_PASSWORD
-       } : undefined
-     },
-     atlas: {
-       appId: process.env.ATLAS_APP_ID,
-       apiKey: process.env.ATLAS_API_KEY,
-       dataApiUrl: process.env.ATLAS_DATA_API_URL,
-       triggersEnabled: process.env.ATLAS_TRIGGERS_ENABLED !== 'false'
-     },
-     processing: {
-       batchSize: parseInt(process.env.BATCH_SIZE || '100'),
-       flushInterval: parseInt(process.env.FLUSH_INTERVAL || '5000'),
-       maxRetries: parseInt(process.env.MAX_RETRIES || '3'),
-       deadLetterQueue: process.env.DLQ_TOPIC || 'dlq-events'
-     }
-   };
-   ```
-
-3. **Docker Compose for Local Development**
-   ```yaml
-   # docker-compose.yml
-   version: '3.8'
-   services:
-     zookeeper:
-       image: confluentinc/cp-zookeeper:latest
-       environment:
-         ZOOKEEPER_CLIENT_PORT: 2181
-         ZOOKEEPER_TICK_TIME: 2000
-     
-     kafka:
-       image: confluentinc/cp-kafka:latest
-       depends_on:
-         - zookeeper
-       ports:
-         - "9092:9092"
-         - "9093:9093"
-       environment:
-         KAFKA_BROKER_ID: 1
-         KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-         KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:9093
-         KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
-         KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-         KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-         KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-     
-     kafka-ui:
-       image: provectuslabs/kafka-ui:latest
-       ports:
-         - "8080:8080"
-       environment:
-         KAFKA_CLUSTERS_0_NAME: local
-         KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093
-       depends_on:
-         - kafka
-     
-     mongodb-local:
-       image: mongo:6.0
-       ports:
-         - "27017:27017"
-       environment:
-         MONGO_INITDB_ROOT_USERNAME: admin
-         MONGO_INITDB_ROOT_PASSWORD: password
-         MONGO_REPLICA_SET_MODE: primary
-         MONGO_REPLICA_SET_NAME: rs0
-       command: --replSet rs0
-       volumes:
-         - mongodb-data:/data/db
-     
-     redis:
-       image: redis:alpine
-       ports:
-         - "6379:6379"
-       command: redis-server --appendonly yes
-       volumes:
-         - redis-data:/data
-
-   volumes:
-     mongodb-data:
-     redis-data:
-   ```
-
-4. **Atlas Connection Helper**
-   ```javascript
-   // src/connectors/atlasConnector.js
-   const { MongoClient } = require('mongodb');
-   const config = require('../config');
-   
-   class AtlasConnector {
-     constructor() {
-       this.client = null;
-       this.db = null;
-       this.isConnected = false;
-       this.reconnectAttempts = 0;
-       this.maxReconnectAttempts = 5;
-     }
-     
-     async connect() {
-       try {
-         console.log('Connecting to MongoDB Atlas...');
-         
-         this.client = new MongoClient(config.mongodb.uri, {
-           ...config.mongodb.options,
-           serverApi: {
-             version: '1',
-             strict: true,
-             deprecationErrors: true,
-           }
-         });
-         
-         await this.client.connect();
-         
-         // Verify connection
-         await this.client.db('admin').command({ ping: 1 });
-         
-         this.db = this.client.db();
-         this.isConnected = true;
-         this.reconnectAttempts = 0;
-         
-         console.log('Successfully connected to MongoDB Atlas');
-         
-         // Set up connection monitoring
-         this.setupEventListeners();
-         
-         return this.db;
-         
-       } catch (error) {
-         console.error('Failed to connect to MongoDB Atlas:', error);
-         await this.handleConnectionError(error);
-         throw error;
-       }
-     }
-     
-     setupEventListeners() {
-       this.client.on('serverDescriptionChanged', (event) => {
-         console.log('Server description changed:', event);
-       });
-       
-       this.client.on('serverClosed', (event) => {
-         console.log('Server connection closed:', event);
-         this.isConnected = false;
-         this.attemptReconnect();
-       });
-       
-       this.client.on('error', (error) => {
-         console.error('MongoDB client error:', error);
-         this.handleConnectionError(error);
-       });
-     }
-     
-     async attemptReconnect() {
-       if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-         console.error('Max reconnection attempts reached');
-         process.exit(1);
-       }
-       
-       this.reconnectAttempts++;
-       const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-       
-       console.log(`Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
-       
-       setTimeout(async () => {
-         try {
-           await this.connect();
-         } catch (error) {
-           console.error('Reconnection failed:', error);
-         }
-       }, delay);
-     }
-     
-     async handleConnectionError(error) {
-       // Log to monitoring system
-       console.error('Connection error:', {
-         message: error.message,
-         code: error.code,
-         timestamp: new Date().toISOString()
-       });
-       
-       // Attempt reconnection for transient errors
-       if (this.isRetryableError(error)) {
-         await this.attemptReconnect();
-       }
-     }
-     
-     isRetryableError(error) {
-       const retryableCodes = [
-         'ECONNREFUSED',
-         'ETIMEDOUT',
-         'ENOTFOUND',
-         'NetworkError',
-         'MongoNetworkError'
-       ];
-       
-       return retryableCodes.some(code => 
-         error.message?.includes(code) || error.code === code
-       );
-     }
-     
-     async disconnect() {
-       if (this.client) {
-         await this.client.close();
-         this.isConnected = false;
-         console.log('Disconnected from MongoDB Atlas');
-       }
-     }
-     
-     getDatabase(dbName) {
-       if (!this.isConnected) {
-         throw new Error('Not connected to MongoDB Atlas');
-       }
-       return dbName ? this.client.db(dbName) : this.db;
-     }
-     
-     async healthCheck() {
-       try {
-         await this.client.db('admin').command({ ping: 1 });
-         return { status: 'healthy', connected: true };
-       } catch (error) {
-         return { status: 'unhealthy', connected: false, error: error.message };
-       }
-     }
-   }
-   
-   module.exports = new AtlasConnector();
-   ```
-
-#### Step 6: Proof of Concept with Atlas
-**Duration: 3-4 days**
-
-1. **Atlas Change Streams POC**
-   ```javascript
-   // src/poc/atlasChangeStreamPoc.js
-   const { MongoClient } = require('mongodb');
-   const { Kafka } = require('kafkajs');
-   
-   class ChangeStreamPOC {
-     constructor(config) {
-       this.config = config;
-       this.resumeTokenStore = new Map();
-       this.processedCount = 0;
-       this.errorCount = 0;
-     }
-     
-     async runPOC() {
-       console.log('Starting Atlas Change Stream POC...');
-       
-       // Connect to Atlas
-       const client = new MongoClient(this.config.atlasUri);
-       await client.connect();
-       
-       // Set up Kafka producer
-       const kafka = new Kafka({
-         clientId: 'poc-producer',
-         brokers: this.config.kafkaBrokers
-       });
-       const producer = kafka.producer();
-       await producer.connect();
-       
-       // Select pilot collection
-       const db = client.db(this.config.database);
-       const collection = db.collection(this.config.pilotCollection);
-       
-       // Create pipeline for filtering changes
-       const pipeline = [
-         {
-           $match: {
-             $or: [
-               { 'operationType': 'insert' },
-               { 'operationType': 'update' },
-               { 'operationType': 'replace' },
-               { 'operationType': 'delete' }
-             ]
-           }
-         },
-         {
-           $project: {
-             '_id': 1,
-             'operationType': 1,
-             'fullDocument': 1,
-             'updateDescription': 1,
-             'documentKey': 1,
-             'ns': 1,
-             'clusterTime': 1
-           }
-         }
-       ];
-       
-       // Start change stream
-       const changeStream = collection.watch(pipeline, {
-         fullDocument: 'updateLookup',
-         resumeAfter: this.getResumeToken(collection.collectionName),
-         maxAwaitTimeMS: 10000
-       });
-       
-       console.log(`Watching changes on ${this.config.database}.${this.config.pilotCollection}`);
-       
-       // Process changes
-       changeStream.on('change', async (change) => {
-         try {
-           await this.processChange(change, producer);
-           this.processedCount++;
-           
-           if (this.processedCount % 100 === 0) {
-             console.log(`Processed ${this.processedCount} changes`);
-           }
-         } catch (error) {
-           this.errorCount++;
-           console.error('Error processing change:', error);
-           await this.handleError(error, change);
-         }
-       });
-       
-       changeStream.on('error', (error) => {
-         console.error('Change stream error:', error);
-         this.reconnectWithBackoff(changeStream);
-       });
-       
-       // Set up graceful shutdown
-       process.on('SIGINT', async () => {
-         console.log('\nShutting down POC...');
-         await changeStream.close();
-         await producer.disconnect();
-         await client.close();
-         this.printMetrics();
-         process.exit(0);
-       });
-       
-       // Run for specified duration or until interrupted
-       if (this.config.pocDuration) {
-         setTimeout(async () => {
-           await changeStream.close();
-           await producer.disconnect();
-           await client.close();
-           this.printMetrics();
-         }, this.config.pocDuration);
-       }
-     }
-     
-     async processChange(change, producer) {
-       // Validate change event
-       if (!this.validateChange(change)) {
-         throw new Error(`Invalid change event: ${JSON.stringify(change)}`);
-       }
-       
-       // Transform for Kafka
-       const kafkaMessage = {
-         topic: `atlas.${change.ns.db}.${change.ns.coll}`,
-         messages: [
-           {
-             key: change.documentKey?._id?.toString() || null,
-             value: JSON.stringify({
-               id: change._id,
-               operation: change.operationType,
-               document: change.fullDocument,
-               updateDescription: change.updateDescription,
-               timestamp: change.clusterTime?.toString(),
-               source: 'atlas-change-stream',
-               processedAt: new Date().toISOString()
-             }),
-             headers: {
-               'operation-type': change.operationType,
-               'database': change.ns.db,
-               'collection': change.ns.coll
-             }
-           }
-         ]
-       };
-       
-       // Send to Kafka
-       await producer.send(kafkaMessage);
-       
-       // Store resume token
-       this.saveResumeToken(change.ns.coll, change._id);
-       
-       // Log sample events for verification
-       if (this.processedCount < 10) {
-         console.log('Sample event:', {
-           operation: change.operationType,
-           collection: change.ns.coll,
-           documentId: change.documentKey?._id
-         });
-       }
-     }
-     
-     validateChange(change) {
-       return change && 
-              change.operationType && 
-              change._id && 
-              change.ns && 
-              change.ns.db && 
-              change.ns.coll;
-     }
-     
-     saveResumeToken(collection, token) {
-       this.resumeTokenStore.set(collection, token);
-       // In production, persist to Redis or database
-     }
-     
-     getResumeToken(collection) {
-       return this.resumeTokenStore.get(collection);
-     }
-     
-     async handleError(error, change) {
-       // Log error details
-       const errorLog = {
-         timestamp: new Date().toISOString(),
-         error: error.message,
-         stack: error.stack,
-         change: change ? {
-           operation: change.operationType,
-           collection: change.ns?.coll,
-           documentId: change.documentKey?._id
-         } : null
-       };
-       
-       console.error('Error log:', errorLog);
-       
-       // In production, send to DLQ or error tracking service
-     }
-     
-     async reconnectWithBackoff(changeStream, attempt = 0) {
-       const maxAttempts = 5;
-       const baseDelay = 1000;
-       
-       if (attempt >= maxAttempts) {
-         console.error('Max reconnection attempts reached');
-         process.exit(1);
-       }
-       
-       const delay = baseDelay * Math.pow(2, attempt);
-       console.log(`Reconnecting in ${delay}ms (attempt ${attempt + 1}/${maxAttempts})`);
-       
-       setTimeout(async () => {
-         try {
-           await changeStream.close();
-           // Restart change stream with saved resume token
-           await this.runPOC();
-         } catch (error) {
-           console.error('Reconnection failed:', error);
-           await this.reconnectWithBackoff(changeStream, attempt + 1);
-         }
-       }, delay);
-     }
-     
-     printMetrics() {
-       console.log('\n=== POC Metrics ===');
-       console.log(`Total processed: ${this.processedCount}`);
-       console.log(`Errors: ${this.errorCount}`);
-       console.log(`Success rate: ${((this.processedCount - this.errorCount) / this.processedCount * 100).toFixed(2)}%`);
-       console.log(`Resume tokens saved: ${this.resumeTokenStore.size}`);
-     }
-   }
-   
-   // Run POC
-   if (require.main === module) {
-     const poc = new ChangeStreamPOC({
-       atlasUri: process.env.MONGODB_ATLAS_URI,
-       kafkaBrokers: ['localhost:9092'],
-       database: 'production',
-       pilotCollection: 'orders',
-       pocDuration: 60000 // Run for 1 minute
-     });
-     
-     poc.runPOC().catch(console.error);
-   }
-   
-   module.exports = ChangeStreamPOC;
-   ```
-
-2. **Compare with Atlas Triggers Performance**
-   ```javascript
-   // src/poc/performanceComparison.js
-   const { MongoClient } = require('mongodb');
-   
-   class PerformanceComparator {
-     constructor(atlasUri) {
-       this.atlasUri = atlasUri;
-       this.metrics = {
-         triggers: { count: 0, totalLatency: 0, errors: 0 },
-         streams: { count: 0, totalLatency: 0, errors: 0 }
-       };
-     }
-     
-     async runComparison(duration = 60000) {
-       const client = new MongoClient(this.atlasUri);
-       await client.connect();
-       
-       const db = client.db('test');
-       const collection = db.collection('benchmark');
-       const resultsCollection = db.collection('benchmark_results');
-       
-       console.log('Starting performance comparison...');
-       
-       // Insert test documents
-       const startTime = Date.now();
-       let documentCount = 0;
-       
-       const insertInterval = setInterval(async () => {
-         const doc = {
-           timestamp: new Date(),
-           value: Math.random() * 1000,
-           type: 'benchmark',
-           iteration: documentCount++
-         };
-         
-         await collection.insertOne(doc);
-         
-         // Track when document is processed by trigger
-         doc.insertedAt = Date.now();
-         this.trackDocument(doc);
-         
-       }, 100); // Insert 10 documents per second
-       
-       // Monitor results
-       const monitorInterval = setInterval(async () => {
-         // Check for processed documents
-         const processed = await resultsCollection.find({
-           timestamp: { $gte: new Date(startTime) }
-         }).toArray();
-         
-         processed.forEach(doc => {
-           if (doc.processedBy === 'atlas-trigger') {
-             this.updateMetrics('triggers', doc);
-           } else if (doc.processedBy === 'change-stream') {
-             this.updateMetrics('streams', doc);
-           }
-         });
-         
-         this.printLiveMetrics();
-         
-       }, 1000);
-       
-       // Run for specified duration
-       setTimeout(async () => {
-         clearInterval(insertInterval);
-         clearInterval(monitorInterval);
-         
-         await client.close();
-         
-         this.printFinalReport();
-         
-       }, duration);
-     }
-     
-     trackDocument(doc) {
-       // Store document for latency tracking
-       this.pendingDocs = this.pendingDocs || new Map();
-       this.pendingDocs.set(doc._id.toString(), doc.insertedAt);
-     }
-     
-     updateMetrics(type, processedDoc) {
-       const insertTime = this.pendingDocs.get(processedDoc.originalId);
-       if (insertTime) {
-         const latency = processedDoc.processedAt - insertTime;
-         this.metrics[type].count++;
-         this.metrics[type].totalLatency += latency;
-         this.pendingDocs.delete(processedDoc.originalId);
-       }
-     }
-     
-     printLiveMetrics() {
-       console.clear();
-       console.log('=== Live Performance Metrics ===\n');
-       
-       ['triggers', 'streams'].forEach(type => {
-         const m = this.metrics[type];
-         const avgLatency = m.count > 0 ? m.totalLatency / m.count : 0;
-         
-         console.log(`${type.toUpperCase()}:`);
-         console.log(`  Processed: ${m.count}`);
-         console.log(`  Avg Latency: ${avgLatency.toFixed(2)}ms`);
-         console.log(`  Errors: ${m.errors}`);
-         console.log('');
-       });
-     }
-     
-     printFinalReport() {
-       console.log('\n=== Final Performance Report ===\n');
-       
-       const comparison = {
-         triggers: this.calculateStats('triggers'),
-         streams: this.calculateStats('streams')
-       };
-       
-       console.table(comparison);
-       
-       // Recommendation
-       const streamLatency = comparison.streams.avgLatency;
-       const triggerLatency = comparison.triggers.avgLatency;
-       
-       if (streamLatency < triggerLatency * 0.5) {
-         console.log('\n✅ Recommendation: Change Streams show significant performance improvement');
-       } else if (streamLatency < triggerLatency) {
-         console.log('\n✅ Recommendation: Change Streams show moderate performance improvement');
-       } else {
-         console.log('\n⚠️  Recommendation: Review configuration - triggers performing better');
-       }
-     }
-     
-     calculateStats(type) {
-       const m = this.metrics[type];
-       return {
-         totalProcessed: m.count,
-         avgLatency: m.count > 0 ? (m.totalLatency / m.count).toFixed(2) + 'ms' : 'N/A',
-         totalErrors: m.errors,
-         successRate: m.count > 0 ? ((m.count - m.errors) / m.count * 100).toFixed(2) + '%' : 'N/A'
-       };
-     }
-   }
-   
-   // Run comparison
-   if (require.main === module) {
-     const comparator = new PerformanceComparator(process.env.MONGODB_ATLAS_URI);
-     comparator.runComparison(120000).catch(console.error); // 2 minute test
-   }
-   
-   module.exports = PerformanceComparator;
-   ```
-
-3. **Validate Data Integrity**
-   ```javascript
-   // src/poc/dataIntegrityValidator.js
-   class DataIntegrityValidator {
-     constructor(sourceDb, targetDb) {
-       this.sourceDb = sourceDb;
-       this.targetDb = targetDb;
-       this.validationResults = [];
-     }
-     
-     async validateBatch(collectionName, batchSize = 100) {
-       const sourceCollection = this.sourceDb.collection(collectionName);
-       const targetCollection = this.targetDb.collection(collectionName);
-       
-       // Get random sample from source
-       const sourceDocs = await sourceCollection
-         .aggregate([{ $sample: { size: batchSize } }])
-         .toArray();
-       
-       let matchCount = 0;
-       let mismatchCount = 0;
-       let missingCount = 0;
-       
-       for (const sourceDoc of sourceDocs) {
-         const targetDoc = await targetCollection.findOne({ 
-           _id: sourceDoc._id 
-         });
-         
-         if (!targetDoc) {
-           missingCount++;
-           this.logValidationError('MISSING', sourceDoc._id);
-         } else if (!this.documentsMatch(sourceDoc, targetDoc)) {
-           mismatchCount++;
-           this.logValidationError('MISMATCH', sourceDoc._id, {
-             source: sourceDoc,
-             target: targetDoc
-           });
-         } else {
-           matchCount++;
-         }
-       }
-       
-       const result = {
-         collection: collectionName,
-         timestamp: new Date(),
-         sampledDocuments: batchSize,
-         matches: matchCount,
-         mismatches: mismatchCount,
-         missing: missingCount,
-         accuracy: (matchCount / batchSize * 100).toFixed(2) + '%'
-       };
-       
-       this.validationResults.push(result);
-       return result;
-     }
-     
-     documentsMatch(doc1, doc2) {
-       // Remove fields that may differ
-       const normalize = (doc) => {
-         const normalized = { ...doc };
-         delete normalized.updatedAt;
-         delete normalized.__v;
-         delete normalized._etlProcessed;
-         return normalized;
-       };
-       
-       return JSON.stringify(normalize(doc1)) === 
-              JSON.stringify(normalize(doc2));
-     }
-     
-     logValidationError(type, documentId, details = null) {
-       const error = {
-         type,
-         documentId,
-         timestamp: new Date(),
-         details
-       };
-       
-       // In production, save to database
-       console.error('Validation error:', error);
-     }
-     
-     getValidationReport() {
-       return {
-         summary: {
-           totalValidations: this.validationResults.length,
-           averageAccuracy: this.calculateAverageAccuracy(),
-           collections: this.validationResults.map(r => r.collection)
-         },
-         details: this.validationResults
-       };
-     }
-     
-     calculateAverageAccuracy() {
-       if (this.validationResults.length === 0) return 0;
-       
-       const totalMatches = this.validationResults.reduce(
-         (sum, r) => sum + r.matches, 0
-       );
-       const totalSampled = this.validationResults.reduce(
-         (sum, r) => sum + r.sampledDocuments, 0
-       );
-       
-       return (totalMatches / totalSampled * 100).toFixed(2) + '%';
-     }
-   }
-   
-   module.exports = DataIntegrityValidator;
-   ```
-
-### Phase 2: Core Implementation
-**Duration: 2-3 weeks**
-
-#### Step 7: Production Infrastructure
-1. **Kafka Cluster Setup**
-   - Deploy multi-node Kafka cluster
-   - Configure replication factor (minimum 3)
-   - Set up SSL/TLS encryption
-   - Implement authentication (SASL)
-
-2. **Network Configuration**
-   - Set up VPC peering if needed
-   - Configure security groups
-   - Implement network policies
-
-3. **Storage Planning**
-   - Calculate retention requirements
-   - Configure log segments
-   - Plan for growth
-
-#### Step 8: Connector Development
-1. **Debezium Configuration**
-   ```json
-   {
-     "name": "mongodb-connector",
-     "config": {
-       "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
-       "mongodb.hosts": "rs0/mongodb1:27017",
-       "mongodb.name": "dbserver",
-       "database.include.list": "inventory",
-       "collection.include.list": "inventory.users,inventory.orders",
-       "snapshot.mode": "initial",
-       "capture.mode": "change_streams_update_full",
-       "mongodb.ssl.enabled": true,
-       "mongodb.authsource": "admin"
-     }
-   }
-   ```
-
-2. **Error Handling**
-   - Implement dead letter queues
-   - Set up retry policies
-   - Configure error reporting
-
-3. **Schema Management**
-   - Deploy Schema Registry
-   - Define schema evolution policies
-   - Implement backward compatibility checks
-
-#### Step 9: Stream Processing Applications
-**Duration: 1 week**
-
-1. **Transformation Services**
-   ```javascript
-   // Node.js example using KafkaJS
-   const { Kafka } = require('kafkajs');
-   const { MongoClient } = require('mongodb');
-   
-   class StreamProcessor {
-     constructor(config) {
-       this.kafka = new Kafka({
-         clientId: config.clientId,
-         brokers: config.brokers,
-         ssl: true,
-         sasl: {
-           mechanism: 'scram-sha-512',
-           username: config.username,
-           password: config.password
-         }
-       });
-       
-       this.consumer = this.kafka.consumer({ 
-         groupId: config.groupId,
-         sessionTimeout: 30000,
-         heartbeatInterval: 3000
-       });
-       
-       this.producer = this.kafka.producer({
-         idempotent: true,
-         maxInFlightRequests: 5,
-         transactionalId: `processor-${config.clientId}`
-       });
-       
-       this.mongoClient = new MongoClient(config.mongoUri);
-     }
-     
-     async start() {
-       await this.consumer.connect();
-       await this.producer.connect();
-       await this.mongoClient.connect();
-       
-       await this.consumer.subscribe({ 
-         topics: ['mongodb.inventory.orders'],
-         fromBeginning: false 
-       });
-       
-       await this.consumer.run({
-         eachMessage: async ({ topic, partition, message }) => {
-           const offset = message.offset;
-           
-           try {
-             // Parse the change event
-             const changeEvent = JSON.parse(message.value.toString());
-             
-             // Transform the data
-             const transformed = await this.transformOrder(changeEvent);
-             
-             // Send to processed topic
-             await this.producer.send({
-               topic: 'processed.orders',
-               messages: [{
-                 key: message.key,
-                 value: JSON.stringify(transformed),
-                 headers: {
-                   'source-offset': offset.toString(),
-                   'processed-at': new Date().toISOString()
-                 }
-               }]
-             });
-             
-             // Update processing metrics
-             await this.updateMetrics(topic, partition, offset);
-             
-           } catch (error) {
-             console.error('Processing error:', error);
-             await this.handleError(error, message);
-           }
-         }
-       });
-     }
-     
-     async transformOrder(changeEvent) {
-       const { fullDocument, operationType, documentKey } = changeEvent;
-       
-       // Apply business transformations
-       const transformed = {
-         id: documentKey._id,
-         operation: operationType,
-         timestamp: new Date().toISOString(),
-         data: {}
-       };
-       
-       if (fullDocument) {
-         // Enrich with additional data
-         const customer = await this.enrichCustomerData(fullDocument.customerId);
-         
-         transformed.data = {
-           orderId: fullDocument._id,
-           customerId: fullDocument.customerId,
-           customerName: customer?.name,
-           customerTier: customer?.tier,
-           orderAmount: fullDocument.amount,
-           orderStatus: fullDocument.status?.toUpperCase(),
-           items: fullDocument.items?.map(item => ({
-             sku: item.sku,
-             quantity: item.quantity,
-             price: item.price,
-             total: item.quantity * item.price
-           })),
-           totalAmount: fullDocument.items?.reduce(
-             (sum, item) => sum + (item.quantity * item.price), 0
-           ),
-           createdAt: fullDocument.createdAt,
-           updatedAt: fullDocument.updatedAt
-         };
-       }
-       
-       return transformed;
-     }
-     
-     async enrichCustomerData(customerId) {
-       if (!customerId) return null;
-       
-       const db = this.mongoClient.db('production');
-       const customer = await db.collection('customers').findOne(
-         { _id: customerId },
-         { projection: { name: 1, tier: 1, creditLimit: 1 } }
-       );
-       
-       return customer;
-     }
-     
-     async handleError(error, message) {
-       // Send to dead letter queue
-       await this.producer.send({
-         topic: 'dlq.orders',
-         messages: [{
-           key: message.key,
-           value: message.value,
-           headers: {
-             'error-message': error.message,
-             'error-stack': error.stack,
-             'original-topic': message.topic,
-             'failed-at': new Date().toISOString()
-           }
-         }]
-       });
-     }
-     
-     async updateMetrics(topic, partition, offset) {
-       // Update processing metrics (e.g., to Prometheus)
-       // Implementation depends on metrics system
-     }
-   }
-   
-   // Usage
-   const processor = new StreamProcessor({
-     clientId: 'order-processor',
-     groupId: 'order-processing-group',
-     brokers: ['kafka1:9092', 'kafka2:9092', 'kafka3:9092'],
-     mongoUri: process.env.MONGODB_URI,
-     username: process.env.KAFKA_USERNAME,
-     password: process.env.KAFKA_PASSWORD
-   });
-   
-   processor.start().catch(console.error);
-   ```
-
-2. **Aggregation Services**
-   ```javascript
-   // Windowed aggregation service
-   class AggregationProcessor {
-     constructor(config) {
-       this.windows = new Map();
-       this.windowDuration = config.windowDuration || 60000; // 1 minute
-       this.stateStore = config.stateStore;
-     }
-     
-     async processEvent(event) {
-       const windowKey = this.getWindowKey(event.timestamp);
-       
-       if (!this.windows.has(windowKey)) {
-         this.windows.set(windowKey, {
-           startTime: windowKey,
-           endTime: windowKey + this.windowDuration,
-           events: [],
-           aggregates: {}
-         });
-         
-         // Schedule window close
-         setTimeout(() => {
-           this.closeWindow(windowKey);
-         }, this.windowDuration);
-       }
-       
-       const window = this.windows.get(windowKey);
-       window.events.push(event);
-       
-       // Update running aggregates
-       await this.updateAggregates(window, event);
-     }
-     
-     async updateAggregates(window, event) {
-       // Update count
-       window.aggregates.count = (window.aggregates.count || 0) + 1;
-       
-       // Update sum
-       if (event.data.amount) {
-         window.aggregates.totalAmount = 
-           (window.aggregates.totalAmount || 0) + event.data.amount;
-       }
-       
-       // Update unique customers
-       if (!window.aggregates.uniqueCustomers) {
-         window.aggregates.uniqueCustomers = new Set();
-       }
-       window.aggregates.uniqueCustomers.add(event.data.customerId);
-       
-       // Calculate average
-       window.aggregates.averageAmount = 
-         window.aggregates.totalAmount / window.aggregates.count;
-     }
-     
-     async closeWindow(windowKey) {
-       const window = this.windows.get(windowKey);
-       if (!window) return;
-       
-       // Finalize aggregates
-       const finalAggregates = {
-         windowStart: new Date(window.startTime),
-         windowEnd: new Date(window.endTime),
-         orderCount: window.aggregates.count,
-         totalRevenue: window.aggregates.totalAmount,
-         averageOrderValue: window.aggregates.averageAmount,
-         uniqueCustomers: window.aggregates.uniqueCustomers.size,
-         topProducts: await this.getTopProducts(window.events)
-       };
-       
-       // Save to state store
-       await this.stateStore.save(windowKey, finalAggregates);
-       
-       // Emit aggregate event
-       await this.emitAggregate(finalAggregates);
-       
-       // Clean up
-       this.windows.delete(windowKey);
-     }
-     
-     async getTopProducts(events) {
-       const productCounts = {};
-       
-       events.forEach(event => {
-         event.data.items?.forEach(item => {
-           productCounts[item.sku] = 
-             (productCounts[item.sku] || 0) + item.quantity;
-         });
-       });
-       
-       return Object.entries(productCounts)
-         .sort(([,a], [,b]) => b - a)
-         .slice(0, 10)
-         .map(([sku, count]) => ({ sku, count }));
-     }
-     
-     getWindowKey(timestamp) {
-       return Math.floor(timestamp / this.windowDuration) * this.windowDuration;
-     }
-   }
-   ```
-
-3. **Sink Connectors**
-   ```javascript
-   // BI Warehouse sink connector
-   class BiWarehouseSink {
-     constructor(config) {
-       this.batchSize = config.batchSize || 1000;
-       this.flushInterval = config.flushInterval || 5000;
-       this.buffer = [];
-       this.warehouseClient = config.warehouseClient;
-       
-       // Set up periodic flush
-       setInterval(() => {
-         this.flush();
-       }, this.flushInterval);
-     }
-     
-     async process(record) {
-       this.buffer.push(record);
-       
-       if (this.buffer.length >= this.batchSize) {
-         await this.flush();
-       }
-     }
-     
-     async flush() {
-       if (this.buffer.length === 0) return;
-       
-       const batch = this.buffer.splice(0, this.batchSize);
-       
-       try {
-         // Transform to warehouse schema
-         const warehouseRecords = batch.map(this.toWarehouseSchema);
-         
-         // Bulk upsert to warehouse
-         await this.warehouseClient.bulkUpsert({
-           table: 'fact_orders',
-           records: warehouseRecords,
-           conflictColumns: ['order_id'],
-           updateColumns: ['status', 'updated_at', 'amount']
-         });
-         
-         console.log(`Flushed ${batch.length} records to warehouse`);
-         
-       } catch (error) {
-         console.error('Warehouse flush error:', error);
-         // Return records to buffer for retry
-         this.buffer.unshift(...batch);
-         throw error;
-       }
-     }
-     
-     toWarehouseSchema(record) {
-       return {
-         order_id: record.data.orderId,
-         customer_id: record.data.customerId,
-         customer_name: record.data.customerName,
-         customer_tier: record.data.customerTier,
-         order_amount: record.data.totalAmount,
-         order_status: record.data.orderStatus,
-         item_count: record.data.items?.length || 0,
-         created_at: record.data.createdAt,
-         updated_at: record.data.updatedAt,
-         processed_at: record.timestamp,
-         etl_timestamp: new Date()
-       };
-     }
-   }
-   ```
-
-### Phase 3: Migration Strategy
-**Duration: 2-3 weeks**
-
-#### Step 10: Parallel Run Strategy
-1. **Enable dual-write mode**
-   - Keep triggers active
-   - Start stream processing in shadow mode
-   - Compare outputs for validation
-
-2. **Data Validation Framework**
-   ```javascript
-   // JavaScript validation framework for parallel run
-   class DataValidator {
-     constructor(triggerDb, streamDb, config = {}) {
-       this.triggerDb = triggerDb;
-       this.streamDb = streamDb;
-       this.discrepancyLog = [];
-       this.metrics = {
-         total: 0,
-         matching: 0,
-         mismatches: 0,
-         missing: 0
-       };
-       this.tolerance = config.tolerance || {
-         timestamp: 1000, // 1 second tolerance
-         numeric: 0.01    // 1% tolerance for numbers
-       };
-     }
-     
-     async validateRecord(recordId) {
-       try {
-         const [triggerRecord, streamRecord] = await Promise.all([
-           this.triggerDb.collection('orders').findOne({ _id: recordId }),
-           this.streamDb.collection('orders').findOne({ _id: recordId })
-         ]);
-         
-         if (!triggerRecord || !streamRecord) {
-           this.metrics.missing++;
-           await this.logDiscrepancy({
-             recordId,
-             type: 'MISSING_RECORD',
-             triggerExists: !!triggerRecord,
-             streamExists: !!streamRecord
-           });
-           return false;
-         }
-         
-         const differences = this.compareRecords(triggerRecord, streamRecord);
-         
-         if (differences.length > 0) {
-           this.metrics.mismatches++;
-           await this.logDiscrepancy({
-             recordId,
-             type: 'DATA_MISMATCH',
-             differences,
-             triggerRecord: this.sanitize(triggerRecord),
-             streamRecord: this.sanitize(streamRecord),
-             timestamp: new Date()
-           });
-           return false;
-         }
-         
-         this.metrics.matching++;
-         return true;
-         
-       } catch (error) {
-         console.error(`Validation error for ${recordId}:`, error);
-         await this.logDiscrepancy({
-           recordId,
-           type: 'VALIDATION_ERROR',
-           error: error.message
-         });
-         return false;
-       } finally {
-         this.metrics.total++;
-       }
-     }
-     
-     compareRecords(record1, record2, path = '') {
-       const differences = [];
-       
-       // Get all unique keys from both records
-       const allKeys = new Set([
-         ...Object.keys(record1 || {}),
-         ...Object.keys(record2 || {})
-       ]);
-       
-       for (const key of allKeys) {
-         const currentPath = path ? `${path}.${key}` : key;
-         const val1 = record1?.[key];
-         const val2 = record2?.[key];
-         
-         // Skip system fields
-         if (['_id', '__v', 'updatedAt'].includes(key)) continue;
-         
-         if (this.isDifferent(val1, val2, key)) {
-           differences.push({
-             field: currentPath,
-             triggerValue: val1,
-             streamValue: val2,
-             type: this.getDifferenceType(val1, val2)
-           });
-         } else if (typeof val1 === 'object' && val1 !== null && !Array.isArray(val1)) {
-           // Recursively compare nested objects
-           differences.push(...this.compareRecords(val1, val2, currentPath));
-         }
-       }
-       
-       return differences;
-     }
-     
-     isDifferent(val1, val2, key) {
-       // Handle null/undefined
-       if (val1 == null || val2 == null) {
-         return val1 !== val2;
-       }
-       
-       // Handle dates with tolerance
-       if (val1 instanceof Date || val2 instanceof Date) {
-         const time1 = new Date(val1).getTime();
-         const time2 = new Date(val2).getTime();
-         return Math.abs(time1 - time2) > this.tolerance.timestamp;
-       }
-       
-       // Handle numbers with tolerance
-       if (typeof val1 === 'number' && typeof val2 === 'number') {
-         const diff = Math.abs(val1 - val2);
-         const avg = (Math.abs(val1) + Math.abs(val2)) / 2;
-         return avg > 0 ? (diff / avg) > this.tolerance.numeric : diff > 0;
-       }
-       
-       // Handle arrays
-       if (Array.isArray(val1) && Array.isArray(val2)) {
-         return JSON.stringify(val1) !== JSON.stringify(val2);
-       }
-       
-       // Default comparison
-       return val1 !== val2;
-     }
-     
-     getDifferenceType(val1, val2) {
-       if (val1 == null && val2 != null) return 'MISSING_IN_TRIGGER';
-       if (val1 != null && val2 == null) return 'MISSING_IN_STREAM';
-       if (typeof val1 !== typeof val2) return 'TYPE_MISMATCH';
-       return 'VALUE_MISMATCH';
-     }
-     
-     sanitize(record) {
-       // Remove sensitive data before logging
-       const sanitized = { ...record };
-       if (sanitized.password) sanitized.password = '[REDACTED]';
-       if (sanitized.apiKey) sanitized.apiKey = '[REDACTED]';
-       return sanitized;
-     }
-     
-     async logDiscrepancy(discrepancy) {
-       this.discrepancyLog.push(discrepancy);
-       
-       // Also log to MongoDB for persistence
-       try {
-         await this.triggerDb.collection('validation_discrepancies')
-           .insertOne(discrepancy);
-       } catch (error) {
-         console.error('Failed to log discrepancy:', error);
-       }
-     }
-     
-     async runValidation(options = {}) {
-       const { 
-         sampleSize = 1000,
-         collections = ['orders', 'customers', 'products'],
-         startDate = new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
-       } = options;
-       
-       console.log('Starting validation run:', { sampleSize, collections, startDate });
-       
-       for (const collection of collections) {
-         console.log(`Validating collection: ${collection}`);
-         
-         // Get sample of recent records
-         const records = await this.triggerDb.collection(collection)
-           .find({ updatedAt: { $gte: startDate } })
-           .limit(sampleSize)
-           .toArray();
-         
-         // Validate each record
-         const validationPromises = records.map(record => 
-           this.validateRecord(record._id)
-         );
-         
-         await Promise.all(validationPromises);
-         
-         // Report collection metrics
-         console.log(`Collection ${collection} validation complete:`, {
-           total: this.metrics.total,
-           matching: this.metrics.matching,
-           mismatches: this.metrics.mismatches,
-           missing: this.metrics.missing,
-           accuracy: ((this.metrics.matching / this.metrics.total) * 100).toFixed(2) + '%'
-         });
-       }
-       
-       return this.generateReport();
-     }
-     
-     generateReport() {
-       const report = {
-         timestamp: new Date(),
-         metrics: this.metrics,
-         accuracy: (this.metrics.matching / this.metrics.total) * 100,
-         discrepancyCount: this.discrepancyLog.length,
-         topDiscrepancies: this.analyzeDiscrepancies(),
-         recommendation: this.getRecommendation()
-       };
-       
-       return report;
-     }
-     
-     analyzeDiscrepancies() {
-       const fieldCounts = {};
-       
-       this.discrepancyLog.forEach(log => {
-         if (log.differences) {
-           log.differences.forEach(diff => {
-             fieldCounts[diff.field] = (fieldCounts[diff.field] || 0) + 1;
-           });
-         }
-       });
-       
-       return Object.entries(fieldCounts)
-         .sort(([,a], [,b]) => b - a)
-         .slice(0, 10)
-         .map(([field, count]) => ({ field, count }));
-     }
-     
-     getRecommendation() {
-       const accuracy = (this.metrics.matching / this.metrics.total) * 100;
-       
-       if (accuracy >= 99.9) {
-         return 'READY_FOR_PRODUCTION: Stream processing matches trigger output with high accuracy';
-       } else if (accuracy >= 95) {
-         return 'MINOR_ISSUES: Review discrepancies and fix edge cases before full migration';
-       } else {
-         return 'MAJOR_ISSUES: Significant discrepancies detected. Investigation required';
-       }
-     }
-   }
-   
-   // Usage example
-   const validator = new DataValidator(triggerDbConnection, streamDbConnection);
-   const report = await validator.runValidation({
-     sampleSize: 5000,
-     collections: ['orders', 'customers'],
-     startDate: new Date('2024-01-01')
-   });
-   
-   console.log('Validation Report:', report);
-   ```
-
-3. **Metrics Comparison**
-   - Compare latency metrics
-   - Validate data completeness
-   - Check processing accuracy
-
-#### Step 11: Gradual Cutover
-**Duration: 1-2 weeks**
-
-1. **Collection-by-collection migration**
-   - Start with least critical collections
-   - Monitor for 24-48 hours per collection
-   - Rollback plan for each stage
-
-2. **Traffic shifting**
-   ```javascript
-   // Feature flag implementation
-   const useStreamProcessing = (collectionName) => {
-     const streamEnabledCollections = getFeatureFlag('stream_collections');
-     return streamEnabledCollections.includes(collectionName);
-   };
-   
-   const syncData = async (collection, document) => {
-     if (useStreamProcessing(collection)) {
-       await streamProcessor.process(document);
-     } else {
-       await triggerProcessor.process(document);
-     }
-   };
-   ```
-
-3. **Trigger decommissioning**
-   - Disable triggers one by one
-   - Keep trigger code for rollback
-   - Document decommission dates
-
-## Testing & Validation
-
-### Step 12: Comprehensive Testing
-**Duration: 1 week**
-
-#### Unit Testing
-```javascript
-// Jest test examples for stream processor
-const { StreamProcessor } = require('../src/streamProcessor');
-const { MongoClient } = require('mongodb');
-const { Kafka } = require('kafkajs');
-
-describe('StreamProcessor', () => {
-  let processor;
-  let mockKafkaProducer;
-  let mockMongoClient;
-  
-  beforeEach(() => {
-    mockKafkaProducer = {
-      send: jest.fn().mockResolvedValue(),
-      connect: jest.fn().mockResolvedValue(),
-      disconnect: jest.fn().mockResolvedValue()
-    };
-    
-    mockMongoClient = {
-      connect: jest.fn().mockResolvedValue(),
-      db: jest.fn().mockReturnValue({
-        collection: jest.fn().mockReturnValue({
-          watch: jest.fn()
-        })
-      })
-    };
-    
-    processor = new StreamProcessor(mockMongoClient, mockKafkaProducer);
-  });
-  
-  describe('transformation logic', () => {
-    test('should transform document correctly', async () => {
-      const inputDoc = {
-        _id: '123',
-        status: 'pending',
-        createdAt: new Date('2024-01-01')
-      };
-      
-      const expected = {
-        id: '123',
-        status: 'PENDING',
-        created_at: '2024-01-01T00:00:00.000Z',
-        processed_at: expect.any(String),
-        version: 1
-      };
-      
-      const result = await processor.transform(inputDoc);
-      expect(result).toMatchObject(expected);
+  constructor() {
+    this.kinesisClient = new KinesisClient({
+      region: config.awsRegion,
+      maxAttempts: 3,
     });
+    this.s3Writer = new S3Writer();
+    this.sqsSender = new SQSSender();
+    this.checkpoints = new Map();
+  }
+
+  async start() {
+    this.isRunning = true;
+    logger.info('Starting Kinesis consumer');
+
+    // Process each stream
+    const streams = Object.keys(config.streamConfig);
     
-    test('should handle missing fields gracefully', async () => {
-      const inputDoc = { _id: '123' };
-      
-      const result = await processor.transform(inputDoc);
-      expect(result).toHaveProperty('id', '123');
-      expect(result).toHaveProperty('status', 'UNKNOWN');
-    });
-    
-    test('should throw error for null document', async () => {
-      await expect(processor.transform(null))
-        .rejects
-        .toThrow('Document cannot be null');
-    });
-  });
-  
-  describe('error handling', () => {
-    test('should retry on transient failures', async () => {
-      mockKafkaProducer.send
-        .mockRejectedValueOnce(new Error('Network error'))
-        .mockResolvedValueOnce();
-      
-      const doc = { _id: '123', data: 'test' };
-      await processor.publishToKafka(doc);
-      
-      expect(mockKafkaProducer.send).toHaveBeenCalledTimes(2);
-    });
-    
-    test('should send to DLQ after max retries', async () => {
-      mockKafkaProducer.send
-        .mockRejectedValue(new Error('Persistent error'));
-      
-      const doc = { _id: '123', data: 'test' };
-      await processor.publishToKafka(doc);
-      
-      expect(processor.dlq.length).toBe(1);
-      expect(processor.dlq[0]).toMatchObject({
-        document: doc,
-        error: 'Persistent error',
-        attempts: 3
+    await Promise.all(
+      streams.map(streamName => this.consumeStream(streamName))
+    );
+  }
+
+  private async consumeStream(streamName: string) {
+    try {
+      // Get shards
+      const describeCommand = new DescribeStreamCommand({
+        StreamName: streamName,
       });
-    });
-  });
-  
-  describe('Atlas trigger compatibility', () => {
-    test('should process Atlas change event format', async () => {
-      const atlasChangeEvent = {
-        _id: { 
-          _data: 'resume_token_here' 
-        },
-        operationType: 'insert',
-        fullDocument: {
-          _id: '123',
-          name: 'Test Document',
-          status: 'active'
-        },
-        ns: {
-          db: 'production',
-          coll: 'users'
-        },
-        documentKey: { _id: '123' }
-      };
-      
-      const result = await processor.processAtlasChange(atlasChangeEvent);
-      
-      expect(result).toHaveProperty('success', true);
-      expect(mockKafkaProducer.send).toHaveBeenCalledWith({
-        topic: 'production.users',
-        messages: [
-          {
-            key: '123',
-            value: expect.stringContaining('active')
-          }
-        ]
-      });
-    });
-  });
-});
+      const streamDescription = await this.kinesisClient.send(describeCommand);
+      const shards = streamDescription.StreamDescription.Shards;
 
-// Integration test with real MongoDB
-describe('StreamProcessor Integration', () => {
-  let mongoClient;
-  let processor;
-  
-  beforeAll(async () => {
-    mongoClient = new MongoClient(process.env.MONGODB_URI);
-    await mongoClient.connect();
-    
-    const kafka = new Kafka({
-      clientId: 'test-processor',
-      brokers: [process.env.KAFKA_BROKER]
-    });
-    
-    const producer = kafka.producer();
-    await producer.connect();
-    
-    processor = new StreamProcessor(mongoClient, producer);
-  });
-  
-  afterAll(async () => {
-    await mongoClient.close();
-    await processor.stop();
-  });
-  
-  test('end-to-end data flow', async (done) => {
-    const testDoc = {
-      _id: 'integration-test-' + Date.now(),
-      data: 'test data',
-      timestamp: new Date()
-    };
-    
-    // Set up change stream listener
-    processor.onProcessed = (doc) => {
-      if (doc.id === testDoc._id) {
-        expect(doc).toHaveProperty('processed_at');
-        done();
+      logger.info('Starting to consume stream', {
+        streamName,
+        shardCount: shards.length,
+      });
+
+      // Process each shard
+      await Promise.all(
+        shards.map(shard => this.processShard(streamName, shard.ShardId))
+      );
+
+    } catch (error) {
+      logger.error('Error consuming stream', { error, streamName });
+      throw error;
+    }
+  }
+
+  private async processShard(streamName: string, shardId: string) {
+    let shardIterator = await this.getShardIterator(streamName, shardId);
+
+    while (this.isRunning && shardIterator) {
+      try {
+        const getRecordsCommand = new GetRecordsCommand({
+          ShardIterator: shardIterator,
+          Limit: config.batchSize,
+        });
+
+        const response = await this.kinesisClient.send(getRecordsCommand);
+        const { Records, NextShardIterator, MillisBehindLatest } = response;
+
+        if (Records && Records.length > 0) {
+          await this.processRecords(streamName, Records);
+          publishMetric('RecordsProcessed', Records.length, { streamName, shardId });
+        }
+
+        publishMetric('MillisBehindLatest', MillisBehindLatest || 0, {
+          streamName,
+          shardId,
+        });
+
+        shardIterator = NextShardIterator;
+
+        // Small delay if no records
+        if (!Records || Records.length === 0) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+      } catch (error) {
+        logger.error('Error processing shard', { error, streamName, shardId });
+        await new Promise(resolve => setTimeout(resolve, 5000));
       }
+    }
+  }
+
+  private async getShardIterator(
+    streamName: string,
+    shardId: string
+  ): Promise<string> {
+    const checkpoint = this.checkpoints.get(`${streamName}:${shardId}`);
+
+    const command = new GetShardIteratorCommand({
+      StreamName: streamName,
+      ShardId: shardId,
+      ShardIteratorType: checkpoint ? 'AFTER_SEQUENCE_NUMBER' : 'TRIM_HORIZON',
+      StartingSequenceNumber: checkpoint,
+    });
+
+    const response = await this.kinesisClient.send(command);
+    return response.ShardIterator;
+  }
+
+  private async processRecords(streamName: string, records: any[]) {
+    for (const record of records) {
+      try {
+        const data = JSON.parse(
+          Buffer.from(record.Data, 'base64').toString('utf-8')
+        );
+
+        await this.processRecord(streamName, data);
+
+        // Update checkpoint
+        this.checkpoints.set(
+          `${streamName}:${record.PartitionKey}`,
+          record.SequenceNumber
+        );
+
+      } catch (error) {
+        logger.error('Error processing record', {
+          error,
+          streamName,
+          sequenceNumber: record.SequenceNumber,
+        });
+        
+        // Send to DLQ
+        await this.sendToDLQ(streamName, record, error);
+        publishMetric('RecordFailed', 1, { streamName });
+      }
+    }
+  }
+
+  private async processRecord(streamName: string, data: any) {
+    const { operationType, fullDocument, documentKey, collection } = data;
+    const env = config.environment;
+    
+    // Prepare document
+    const fullStringBody = JSON.stringify(
+      fullDocument || documentKey
+    );
+    
+    const baseKeyName = `${env}/${collection}/${documentKey._id}-${Date.now()}`;
+    const maxS3ObjectSizeInBytes = 4194304; // 4MB limit
+    const objectsToPutInS3: any[] = [];
+
+    // Handle large documents - chunk if necessary
+    if (fullStringBody.length > maxS3ObjectSizeInBytes) {
+      const numChunks = Math.ceil(fullStringBody.length / maxS3ObjectSizeInBytes);
+      const stringChunkLength = Math.ceil(fullStringBody.length / numChunks);
+
+      for (let i = 0, n = 0; i < numChunks; i++, n += stringChunkLength) {
+        objectsToPutInS3.push({
+          Bucket: config.s3Bucket,
+          Key: `${baseKeyName}-${i}`,
+          Body: fullStringBody.substring(n, n + stringChunkLength),
+        });
+      }
+    } else {
+      objectsToPutInS3.push({
+        Bucket: config.s3Bucket,
+        Key: baseKeyName,
+        Body: fullStringBody,
+      });
+    }
+
+    // Write to S3
+    await this.s3Writer.putObjects(objectsToPutInS3);
+
+    // Send SQS message
+    const queueUrl = config.streamConfig[streamName].sqsQueueUrl;
+    const messageBody = {
+      operation: operationType,
+      S3FilePartsOfJSONDocument: objectsToPutInS3.map(obj => ({
+        Bucket: obj.Bucket,
+        Key: obj.Key,
+      })),
     };
-    
-    await processor.start();
-    
-    // Insert document to trigger change stream
-    const db = mongoClient.db('test');
-    await db.collection('test_collection').insertOne(testDoc);
-  }, 10000);
+
+    await this.sqsSender.sendMessage(
+      queueUrl,
+      collection,
+      messageBody,
+      baseKeyName
+    );
+
+    logger.debug('Record processed successfully', {
+      collection,
+      documentId: documentKey._id,
+      operation: operationType,
+      s3Objects: objectsToPutInS3.length,
+    });
+  }
+
+  private async sendToDLQ(streamName: string, record: any, error: any) {
+    const dlqUrl = config.streamConfig[streamName].dlqUrl;
+    if (!dlqUrl) return;
+
+    await this.sqsSender.sendMessage(
+      dlqUrl,
+      'dlq',
+      {
+        originalRecord: record,
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      },
+      `dlq-${Date.now()}`
+    );
+  }
+
+  async stop() {
+    logger.info('Stopping consumer...');
+    this.isRunning = false;
+    // Save checkpoints to DynamoDB here
+  }
+}
+
+// Start the consumer
+const consumer = new KinesisConsumerApp();
+consumer.start().catch((error) => {
+  logger.error('Fatal error', { error });
+  process.exit(1);
+});
+
+process.on('SIGTERM', () => consumer.stop());
+process.on('SIGINT', () => consumer.stop());
+```
+
+**packages/kinesis-consumer/src/s3-writer.ts**
+```typescript
+import { S3 } from 'aws-sdk';
+import { logger } from '@shared/logger';
+import config from './config';
+
+export class S3Writer {
+  private s3: S3;
+
+  constructor() {
+    this.s3 = new S3({
+      region: config.awsRegion,
+      maxRetries: 3,
+    });
+  }
+
+  async putObjects(objects: Array<{ Bucket: string; Key: string; Body: string }>) {
+    try {
+      // Write all objects in parallel
+      await Promise.all(
+        objects.map(obj =>
+          this.putObjectWithRetry(obj.Bucket, obj.Key, obj.Body)
+        )
+      );
+
+      logger.debug('Successfully wrote objects to S3', {
+        count: objects.length,
+        keys: objects.map(o => o.Key),
+      });
+
+    } catch (error) {
+      logger.error('Failed to write objects to S3', {
+        error,
+        objectCount: objects.length,
+      });
+      throw error;
+    }
+  }
+
+  private async putObjectWithRetry(
+    bucket: string,
+    key: string,
+    body: string,
+    attempt = 1
+  ): Promise<void> {
+    try {
+      await this.s3
+        .putObject({
+          Bucket: bucket,
+          Key: key,
+          Body: body,
+          ContentType: 'application/json',
+        })
+        .promise();
+
+    } catch (error: any) {
+      if (attempt < config.maxRetries) {
+        const backoffMs = Math.min(100 * Math.pow(2, attempt), 5000);
+        logger.warn('Retrying S3 write after failure', {
+          bucket,
+          key,
+          attempt,
+          backoffMs,
+        });
+        
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        return this.putObjectWithRetry(bucket, key, body, attempt + 1);
+      }
+      
+      logger.error('Failed to write to S3 after retries', {
+        error,
+        bucket,
+        key,
+        attempts: attempt,
+      });
+      throw error;
+    }
+  }
+}
+```
+
+**packages/kinesis-consumer/src/sqs-sender.ts**
+```typescript
+import { SQS } from 'aws-sdk';
+import { logger } from '@shared/logger';
+import config from './config';
+
+export class SQSSender {
+  private sqs: SQS;
+
+  constructor() {
+    this.sqs = new SQS({
+      region: config.awsRegion,
+      maxRetries: 3,
+    });
+  }
+
+  async sendMessage(
+    queueUrl: string,
+    messageGroupId: string,
+    messageBody: any,
+    deduplicationId: string
+  ) {
+    try {
+      await this.sendWithRetry(
+        queueUrl,
+        messageGroupId,
+        messageBody,
+        deduplicationId
+      );
+
+      logger.debug('Successfully sent SQS message', {
+        queueUrl,
+        messageGroupId,
+      });
+
+    } catch (error) {
+      logger.error('Failed to send SQS message', {
+        error,
+        queueUrl,
+        messageGroupId,
+      });
+      throw error;
+    }
+  }
+
+  private async sendWithRetry(
+    queueUrl: string,
+    messageGroupId: string,
+    messageBody: any,
+    deduplicationId: string,
+    attempt = 1
+  ): Promise<void> {
+    try {
+      await this.sqs
+        .sendMessage({
+          QueueUrl: queueUrl,
+          MessageGroupId: messageGroupId,
+          MessageBody: JSON.stringify(messageBody),
+          MessageDeduplicationId: deduplicationId,
+        })
+        .promise();
+
+    } catch (error: any) {
+      if (attempt < config.maxRetries) {
+        const backoffMs = Math.min(100 * Math.pow(2, attempt), 5000);
+        logger.warn('Retrying SQS send after failure', {
+          queueUrl,
+          attempt,
+          backoffMs,
+        });
+        
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        return this.sendWithRetry(
+          queueUrl,
+          messageGroupId,
+          messageBody,
+          deduplicationId,
+          attempt + 1
+        );
+      }
+      
+      logger.error('Failed to send to SQS after retries', {
+        error,
+        queueUrl,
+        attempts: attempt,
+      });
+      throw error;
+    }
+  }
+}
+```
+
+### 3. Shared Types and Utilities
+
+**packages/shared/src/types.ts**
+```typescript
+export interface CollectionConfig {
+  database: string;
+  collection: string;
+  streamName: string;
+}
+
+export interface StreamConfig {
+  sqsQueueUrl: string;
+  dlqUrl?: string;
+}
+
+export interface ChangeEvent {
+  operationType: 'insert' | 'update' | 'replace' | 'delete';
+  documentKey: { _id: any };
+  fullDocument?: any;
+  ns: {
+    db: string;
+    coll: string;
+  };
+  timestamp: string;
+}
+
+export interface ProcessedRecord {
+  operation: string;
+  S3FilePartsOfJSONDocument: Array<{
+    Bucket: string;
+    Key: string;
+  }>;
+}
+```
+
+**packages/shared/src/logger.ts**
+```typescript
+import winston from 'winston';
+
+export const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: {
+    service: process.env.SERVICE_NAME || 'stream-processor',
+    environment: process.env.NODE_ENV || 'development',
+  },
+  transports: [
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      ),
+    }),
+  ],
 });
 ```
 
-#### Integration Testing
-1. **End-to-end data flow**
-   - Insert test records in MongoDB
-   - Verify processing through pipeline
-   - Validate sink data accuracy
+**packages/shared/src/metrics.ts**
+```typescript
+import { CloudWatch } from 'aws-sdk';
 
-2. **Failure scenario testing**
-   - Network partition simulation
-   - Broker failure recovery
-   - Connector restart validation
+const cloudwatch = new CloudWatch({
+  region: process.env.AWS_REGION || 'us-east-1',
+});
 
-#### Performance Testing
-```bash
-# Kafka performance testing
-kafka-producer-perf-test \
-  --topic test-topic \
-  --num-records 1000000 \
-  --record-size 1000 \
-  --throughput 10000 \
-  --producer-props bootstrap.servers=localhost:9092
+const namespace = 'StreamProcessing';
+
+export async function publishMetric(
+  metricName: string,
+  value: number,
+  dimensions: Record<string, string>
+): Promise<void> {
+  try {
+    await cloudwatch
+      .putMetricData({
+        Namespace: namespace,
+        MetricData: [
+          {
+            MetricName: metricName,
+            Value: value,
+            Timestamp: new Date(),
+            Dimensions: Object.entries(dimensions).map(([Name, Value]) => ({
+              Name,
+              Value,
+            })),
+            Unit: 'Count',
+          },
+        ],
+      })
+      .promise();
+  } catch (error) {
+    console.error('Failed to publish metric', { error, metricName });
+  }
+}
 ```
 
-#### Chaos Engineering
-1. **Fault injection**
-   - Random broker shutdowns
-   - Network latency injection
-   - MongoDB primary failover
+### 4. Validation Script
 
-2. **Recovery validation**
-   - Measure recovery time
-   - Validate data consistency
-   - Check for message loss
+**scripts/validation/compare-outputs.js**
+```javascript
+const AWS = require('aws-sdk');
+const crypto = require('crypto');
 
-## Monitoring & Observability
+const s3 = new AWS.S3();
 
-### Step 13: Implement Comprehensive Monitoring
-**Duration: 3-4 days**
+async function validateMigration(collection, startTime, endTime) {
+  console.log(`Validating ${collection} from ${startTime} to ${endTime}`);
 
-#### Metrics Collection
-```yaml
-# Prometheus configuration
-global:
-  scrape_interval: 15s
-
-scrape_configs:
-  - job_name: 'kafka'
-    static_configs:
-      - targets: ['kafka1:9090', 'kafka2:9090', 'kafka3:9090']
+  // Get files from old trigger path
+  const oldFiles = await listS3Files('dev', collection, startTime, endTime);
   
-  - job_name: 'debezium'
-    static_configs:
-      - targets: ['connect:8083']
+  // Get files from new system path
+  const newFiles = await listS3Files('prod', collection, startTime, endTime);
+
+  // Compare counts
+  console.log(`Old system files: ${oldFiles.length}`);
+  console.log(`New system files: ${newFiles.length}`);
+
+  // Sample and compare content
+  const sampleSize = Math.min(100, oldFiles.length);
+  let matches = 0;
+
+  for (let i = 0; i < sampleSize; i++) {
+    const oldContent = await getS3Content(oldFiles[i].Key);
+    const newContent = await getS3Content(newFiles[i].Key);
+
+    const oldHash = crypto.createHash('md5').update(oldContent).digest('hex');
+    const newHash = crypto.createHash('md5').update(newContent).digest('hex');
+
+    if (oldHash === newHash) {
+      matches++;
+    } else {
+      console.log(`Mismatch found: ${oldFiles[i].Key}`);
+    }
+  }
+
+  const matchRate = (matches / sampleSize) * 100;
+  console.log(`Match rate: ${matchRate.toFixed(2)}%`);
+
+  return matchRate > 99.9;
+}
+
+async function listS3Files(prefix, collection, startTime, endTime) {
+  const params = {
+    Bucket: process.env.S3_BUCKET,
+    Prefix: `${prefix}/${collection}/`,
+  };
+
+  const files = [];
+  let continuationToken = null;
+
+  do {
+    if (continuationToken) {
+      params.ContinuationToken = continuationToken;
+    }
+
+    const response = await s3.listObjectsV2(params).promise();
+    
+    const filtered = response.Contents.filter(item => {
+      const timestamp = new Date(item.LastModified);
+      return timestamp >= startTime && timestamp <= endTime;
+    });
+
+    files.push(...filtered);
+    continuationToken = response.NextContinuationToken;
+
+  } while (continuationToken);
+
+  return files;
+}
+
+async function getS3Content(key) {
+  const params = {
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+  };
+
+  const response = await s3.getObject(params).promise();
+  return response.Body.toString('utf-8');
+}
+
+// Run validation
+const collection = process.argv[2] || 'users';
+const hoursAgo = parseInt(process.argv[3]) || 1;
+
+const endTime = new Date();
+const startTime = new Date(endTime - hoursAgo * 60 * 60 * 1000);
+
+validateMigration(collection, startTime, endTime)
+  .then(success => {
+    console.log(success ? 'Validation PASSED' : 'Validation FAILED');
+    process.exit(success ? 0 : 1);
+  })
+  .catch(error => {
+    console.error('Validation error:', error);
+    process.exit(1);
+  });
 ```
 
-#### Key Metrics to Track
-1. **Pipeline Health**
-   - Message throughput (records/sec)
-   - Processing latency (p50, p95, p99)
-   - Error rate
-   - Lag monitoring
+### 5. Docker Configuration
 
-2. **Business Metrics**
-   - Records processed per collection
-   - Transformation success rate
-   - Data freshness in BI warehouse
+**packages/change-stream-consumer/Dockerfile**
+```dockerfile
+FROM node:18-alpine
 
-3. **Infrastructure Metrics**
-   - Kafka cluster health
-   - Disk usage and I/O
-   - Network throughput
-   - JVM metrics
+WORKDIR /app
 
-#### Alerting Rules
-```yaml
-# AlertManager rules
-groups:
-  - name: stream_processing
-    rules:
-      - alert: HighProcessingLag
-        expr: kafka_consumer_lag > 10000
-        for: 5m
-        annotations:
-          summary: "High lag detected in consumer group {{ $labels.consumer_group }}"
-      
-      - alert: ConnectorFailure
-        expr: debezium_connector_status != 1
-        for: 1m
-        annotations:
-          summary: "Debezium connector {{ $labels.connector }} is not running"
+# Copy package files
+COPY package*.json ./
+COPY packages/change-stream-consumer/package*.json ./packages/change-stream-consumer/
+COPY packages/shared/package*.json ./packages/shared/
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy source code
+COPY packages/change-stream-consumer ./packages/change-stream-consumer
+COPY packages/shared ./packages/shared
+
+# Build TypeScript
+RUN npm run build
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:8080/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); })"
+
+# Run
+USER node
+CMD ["node", "packages/change-stream-consumer/dist/index.js"]
 ```
 
-#### Dashboards
-1. **Operations Dashboard**
-   - Real-time pipeline status
-   - Throughput graphs
-   - Error rate trends
-   - Resource utilization
+### 6. Test Examples
 
-2. **Business Dashboard**
-   - Data freshness indicators
-   - Processing SLA compliance
-   - Collection-specific metrics
+**packages/change-stream-consumer/tests/kinesis-producer.test.ts**
+```typescript
+import { KinesisProducer } from '../src/kinesis-producer';
+import { mockClient } from 'aws-sdk-client-mock';
+import { KinesisClient, PutRecordsCommand } from '@aws-sdk/client-kinesis';
+
+const kinesisMock = mockClient(KinesisClient);
+
+describe('KinesisProducer', () => {
+  let producer: KinesisProducer;
+
+  beforeEach(() => {
+    kinesisMock.reset();
+    producer = new KinesisProducer();
+  });
+
+  afterEach(async () => {
+    await producer.close();
+  });
+
+  it('should buffer and batch records', async () => {
+    kinesisMock.on(PutRecordsCommand).resolves({
+      FailedRecordCount: 0,
+      Records: [{ SequenceNumber: '123', ShardId: 'shard-1' }],
+    });
+
+    const data = { test: 'data' };
+    await producer.putRecord('test-stream', data, 'partition-1');
+
+    // Should not have called Kinesis yet (buffered)
+    expect(kinesisMock.calls()).toHaveLength(0);
+
+    // Wait for flush
+    await new Promise(resolve => setTimeout(resolve, 1100));
+
+    // Should have flushed to Kinesis
+    expect(kinesisMock.calls()).toHaveLength(1);
+  });
+
+  it('should retry on failure', async () => {
+    kinesisMock
+      .on(PutRecordsCommand)
+      .rejectsOnce(new Error('Throttled'))
+      .resolves({
+        FailedRecordCount: 0,
+        Records: [{ SequenceNumber: '123', ShardId: 'shard-1' }],
+      });
+
+    const data = { test: 'data' };
+    await producer.putRecord('test-stream', data, 'partition-1');
+    await producer.flush();
+
+    // Should have retried
+    expect(kinesisMock.calls()).toHaveLength(2);
+  });
+});
+```
+
+**package.json (root)**
+```json
+{
+  "name": "stream-processing-service",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "jest",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write \"**/*.{ts,js,json,md}\""
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^18.15.0",
+    "@typescript-eslint/eslint-plugin": "^5.57.0",
+    "@typescript-eslint/parser": "^5.57.0",
+    "aws-sdk-client-mock": "^2.1.0",
+    "eslint": "^8.37.0",
+    "jest": "^29.5.0",
+    "prettier": "^2.8.7",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.0.2"
+  }
+}
+```
+
+---
+
+## Detailed Migration Plan
+
+### Phase 1: Investigation & Setup (Week 1-2)
+
+#### Week 1: Architecture Validation & Environment Setup
+
+**Tasks:**
+1. **AWS Infrastructure Provisioning**
+   - Create VPC, subnets, security groups for ECS
+   - Provision IAM roles and policies
+   - Set up CloudWatch log groups and dashboards
+   - Create development Kinesis streams (test)
+
+2. **MongoDB Analysis**
+   - Measure current change event volume per collection
+   - Document peak traffic patterns
+   - Identify collections with large documents
+   - Review current error rates from trigger logs
+
+3. **Team Preparation**
+   - AWS Kinesis training for team
+   - Set up development environment
+   - Create GitHub repository for new services
+   - Define coding standards and review process
+
+**Deliverables:**
+- AWS infrastructure in development account
+- Volume and performance baseline document
+- Team trained on Kinesis concepts
+
+#### Week 2: Proof of Concept
+
+**Tasks:**
+1. **Build Change Stream Consumer**
+   - Implement basic change stream listener
+   - Handle connection failures and resume tokens
+   - Add logging and metrics
+   - Write unit tests
+
+2. **Build Kinesis Consumer**
+   - Implement Kinesis Client Library (KCL) consumer
+   - Recreate S3 chunking logic
+   - Recreate SQS message sending
+   - Add error handling
+
+3. **Test with Lowest Volume Collection**
+   - Deploy to development environment
+   - Run parallel to existing trigger (users collection)
+   - Compare outputs (S3 files and SQS messages)
+   - Measure latency and throughput
+
+**Deliverables:**
+- Working POC code in GitHub
+- POC test results and comparison report
+- Performance metrics document
+
+**Success Criteria:**
+- Events processed within 5 seconds of database change
+- 100% parity with trigger outputs
+- Zero data loss in 48-hour test period
+
+---
+
+### Phase 2: Development & Testing (Week 3-6)
+
+#### Week 3-4: Production-Ready Implementation
+
+**Tasks:**
+1. **Enhance Change Stream Consumer**
+   - Implement multi-collection watching
+   - Add health checks and graceful shutdown
+   - Implement exponential backoff for Kinesis writes
+   - Add structured logging (JSON format)
+   - Implement metrics publishing (CloudWatch)
+   - Create Dockerfile and ECS task definition
+
+2. **Enhance Kinesis Consumer**
+   - Implement batch processing optimization
+   - Add DLQ integration
+   - Create retry logic with jitter
+   - Implement idempotency checks
+   - Add distributed tracing (X-Ray)
+   - Create ECS task definition
+
+3. **Infrastructure as Code**
+   - Terraform modules for all AWS resources
+   - Automated deployment pipeline (CodePipeline)
+   - Environment-specific configurations
+   - Secrets management (Secrets Manager)
+
+4. **Monitoring & Alerting**
+   - CloudWatch dashboards for each stream
+   - Alarms for processing lag, errors, DLQ depth
+   - PagerDuty/Slack integration
+   - Runbook for common issues
+
+**Deliverables:**
+- Production-ready code with tests (>80% coverage)
+- Complete Terraform infrastructure
+- CI/CD pipeline deployed
+- Monitoring dashboards and alerts configured
+
+#### Week 5-6: Integration Testing
+
+**Tasks:**
+1. **Staging Environment Deployment**
+   - Deploy to staging AWS account
+   - Configure to read from MongoDB staging cluster
+   - Run parallel with existing triggers
+
+2. **Comprehensive Testing**
+   - Load testing (simulate 10x current volume)
+   - Failure testing (kill consumers, network issues)
+   - Large document testing (>4MB documents)
+   - Backpressure testing
+   - End-to-end latency testing
+
+3. **Validation**
+   - Compare S3 outputs byte-by-byte
+   - Verify SQS message parity
+   - Validate deduplication behavior
+   - Test resume from checkpoint
+   - Verify data ordering
+
+**Deliverables:**
+- Test results documentation
+- Performance benchmark report
+- Issue log and resolution tracking
+- Sign-off from QA and Infrastructure teams
+
+**Success Criteria:**
+- Handle 10x current peak volume
+- 99.9% uptime in 1-week test
+- <5 second p95 processing latency
+- Zero data loss during failure scenarios
+
+---
+
+### Phase 3: Staged Migration (Week 7-10)
+
+The migration will be executed in stages, starting with lowest-risk collections and progressing to critical ones.
+
+#### Migration Priority Order
+
+**Tier 1: Development/Testing (Week 7)**
+1. `users_etl` (DevelopmentCluster)
+2. `owners_etl` (DevelopmentCluster)
+
+**Rationale:** Development cluster with lower risk, good for validating production process
+
+**Tier 2: Medium Volume (Week 8)**
+3. `reservation_payments_etl` (Production-Copy)
+4. `reservation_charges_etl` (Production-Copy)
+
+**Rationale:** Production-Copy cluster provides safety net, moderate volume
+
+**Tier 3: Higher Volume (Week 9)**
+5. `reservation_objs_etl` (Production-Copy)
+6. `aadw_reservationdatafacilities_v3` (Primary)
+
+**Rationale:** Higher volume but still manageable
+
+**Tier 4: Critical (Week 10)**
+7. `reservations_etl` (Primary)
+
+**Rationale:** Highest volume and most critical, migrate last with full confidence
+
+---
+
+### Detailed Migration Steps (Per Trigger)
+
+For each trigger, follow this process:
+
+#### Step 1: Pre-Migration (Day 1 - Tuesday)
+
+**Activities:**
+1. **Setup**
+   - Create Kinesis stream: `<collection-name>-changes`
+   - Deploy Change Stream consumer for this collection (disabled)
+   - Deploy Kinesis consumer for this stream (disabled)
+   - Configure CloudWatch dashboards
+
+2. **Validation Checkpoint**
+   - Capture baseline metrics from current trigger
+   - Document current error rate
+   - Take snapshot of SQS queue state
+   - Review recent S3 writes
+
+3. **Communication**
+   - Notify BI team of upcoming change
+   - Send migration notice to stakeholders
+   - Confirm rollback contact person on-call
+
+**Duration:** 4 hours
+
+#### Step 2: Shadow Mode (Day 2-4 - Wed-Fri)
+
+**Activities:**
+1. **Enable New System**
+   - Enable Change Stream consumer
+   - Enable Kinesis consumer
+   - Keep existing trigger running
+
+2. **Parallel Validation**
+   - Both systems writing to S3 (different prefix: `dev/<collection>/` vs `prod/<collection>/`)
+   - Compare outputs programmatically:
+     ```javascript
+     // Validation script runs hourly
+     // - Count of S3 files created
+     // - Count of SQS messages sent
+     // - Checksum comparison of document content
+     // - Latency comparison
+     ```
+   - Review CloudWatch logs for errors
+   - Monitor consumer lag
+
+3. **Acceptance Criteria**
+   - 99.9% match rate for 72 hours
+   - New system latency < current trigger latency
+   - Zero crashes or restarts
+   - All errors handled gracefully
+
+**Duration:** 3 days (72 hours)
+
+#### Step 3: Cutover (Day 5 - Monday)
+
+**Activities:**
+1. **Pre-Cutover Checks** (8:00 AM)
+   - Verify shadow mode success metrics
+   - Confirm monitoring is working
+   - Verify rollback procedure
+   - Ensure on-call person available
+
+2. **Execute Cutover** (10:00 AM)
+   - Disable MongoDB trigger (keep as backup)
+   - Update S3 prefix in consumer to write to `prod/<collection>/`
+   - Update SQS message routing
+   - Monitor for 2 hours continuously
+
+3. **Validation** (12:00 PM - 5:00 PM)
+   - Verify ETL pipeline continues normally
+   - Check BI dashboard data freshness
+   - Review error rates and latency
+   - Validate SQS queue processing
+
+4. **Completion** (5:00 PM)
+   - Declare migration successful
+   - Update documentation
+   - Schedule trigger deletion for 7 days later
+
+**Duration:** 8 hours (business hours)
+
+#### Step 4: Monitoring (Day 6-12)
+
+**Activities:**
+1. **Close Monitoring**
+   - Review metrics daily
+   - Check DLQ for any failed events
+   - Compare data volumes with historical baseline
+   - Validate with BI team
+
+2. **Documentation**
+   - Update runbooks
+   - Record any issues and resolutions
+   - Note performance differences
+   - Document lessons learned
+
+**Duration:** 7 days
+
+#### Step 5: Cleanup (Day 13+)
+
+**Activities:**
+1. **Remove Old Trigger**
+   - Disable trigger in MongoDB Atlas
+   - Archive trigger code for reference
+   - Remove trigger-specific IAM permissions
+   - Update documentation
+
+2. **Optimization**
+   - Review Kinesis shard utilization
+   - Optimize consumer batch sizes
+   - Fine-tune retry parameters
+   - Update alerts based on actual patterns
+
+**Duration:** 4 hours
+
+---
+
+### Migration Calendar
+
+```
+Week 7: Development Cluster
+├─ Mon-Tue: users_etl preparation
+├─ Wed-Fri: users_etl shadow mode
+├─ Mon: users_etl cutover
+├─ Tue-Wed: owners_etl preparation
+├─ Thu-Sat: owners_etl shadow mode
+└─ Mon: owners_etl cutover
+
+Week 8: Production-Copy - Payments & Charges
+├─ Mon-Tue: reservation_payments_etl preparation
+├─ Wed-Fri: reservation_payments_etl shadow mode
+├─ Mon: reservation_payments_etl cutover
+├─ Tue-Wed: reservation_charges_etl preparation
+├─ Thu-Sat: reservation_charges_etl shadow mode
+└─ Mon: reservation_charges_etl cutover
+
+Week 9: Production-Copy - Objects & Analytics View
+├─ Mon-Tue: reservation_objs_etl preparation
+├─ Wed-Fri: reservation_objs_etl shadow mode
+├─ Mon: reservation_objs_etl cutover
+├─ Tue-Wed: aadw_reservationdatafacilities_v3 preparation
+├─ Thu-Sat: aadw_reservationdatafacilities_v3 shadow mode
+└─ Mon: aadw_reservationdatafacilities_v3 cutover
+
+Week 10: Primary - Critical Reservations
+├─ Mon-Tue: reservations_etl preparation
+├─ Wed-Fri: reservations_etl shadow mode
+├─ Mon: reservations_etl cutover
+└─ Tue-Fri: Final validation and documentation
+```
+
+---
 
 ## Risk Mitigation
 
-### Step 14: Risk Assessment and Mitigation
-**Duration: 2 days**
+### Identified Risks & Mitigation Strategies
 
-| Risk | Probability | Impact | Mitigation Strategy |
-|------|------------|--------|-------------------|
-| Data Loss | Low | High | Implement exactly-once semantics, maintain audit logs |
-| Performance Degradation | Medium | Medium | Capacity planning, auto-scaling, performance testing |
-| Connector Failures | Medium | High | HA configuration, automatic restart, monitoring |
-| Schema Changes | High | Medium | Schema Registry, versioning, compatibility checks |
-| Operational Complexity | High | Low | Comprehensive documentation, training, runbooks |
+#### Risk 1: Data Loss During Migration
+**Severity:** Critical  
+**Probability:** Low  
 
-### Rollback Plan
-1. **Immediate Rollback Triggers**
-   - Data loss detected
-   - Processing lag > 1 hour
-   - Critical error rate > 5%
+**Mitigation:**
+- Shadow mode ensures new system working before cutover
+- Keep triggers active as backup during shadow mode
+- Resume tokens ensure no events missed
+- DLQ captures any processing failures
+- Checkpointing ensures exactly-once processing
 
-2. **Rollback Procedure**
-   ```bash
-   # 1. Stop stream processors
-   kubectl scale deployment stream-processor --replicas=0
-   
-   # 2. Re-enable MongoDB triggers
-   mongosh --eval "db.enableTriggers()"
-   
-   # 3. Verify trigger functionality
-   ./scripts/validate-triggers.sh
-   
-   # 4. Notify stakeholders
-   ./scripts/send-rollback-notification.sh
-   ```
+**Rollback:** Immediately re-enable trigger, investigate Kinesis consumer
 
-## Timeline & Milestones
+---
 
-### Overall Timeline: 8-10 weeks
+#### Risk 2: Increased Latency
+**Severity:** Medium  
+**Probability:** Medium  
 
-#### Week 1-2: Investigation & Planning
-- ✅ Current state analysis
-- ✅ Technology evaluation
-- ✅ Architecture design
-- ✅ Team alignment
+**Mitigation:**
+- Performance testing in staging validates latency
+- Kinesis on-demand mode auto-scales
+- Batch processing optimizations
+- CloudWatch alarms for lag threshold
 
-#### Week 3-4: Environment Setup & POC
-- ✅ Development environment
-- ✅ Proof of concept
-- ✅ Initial validation
-- ✅ Stakeholder demo
+**Rollback:** Tune consumer settings, add more consumers if needed
 
-#### Week 5-6: Core Implementation
-- ✅ Production infrastructure
-- ✅ Connector development
-- ✅ Stream processors
-- ✅ Basic monitoring
+---
 
-#### Week 7-8: Testing & Validation
-- ✅ Comprehensive testing
-- ✅ Performance validation
-- ✅ Security review
-- ✅ Documentation
+#### Risk 3: Cost Overrun
+**Severity:** Medium  
+**Probability:** Low  
 
-#### Week 9-10: Migration & Go-Live
-- ✅ Gradual migration
-- ✅ Production validation
-- ✅ Full cutover
-- ✅ Retrospective
+**Mitigation:**
+- On-demand Kinesis pricing is predictable
+- Start with minimal retention (24 hours)
+- Monitor costs weekly during migration
+- Set AWS budget alerts
 
-### Success Criteria Validation
+**Cost Estimates:**
+- Kinesis: ~$500/month (estimated for all streams)
+- ECS Fargate: ~$200/month (2 consumers)
+- Data Transfer: ~$50/month
+- **Total: ~$750/month** (vs current trigger costs unknown)
 
-| Criteria | Target | Method |
-|----------|--------|--------|
-| Processing Latency | < 1 second | Monitoring metrics |
-| Data Accuracy | 100% | Validation framework |
-| System Availability | 99.9% | Uptime monitoring |
-| BI Readiness | Confirmed | BI team sign-off |
-| Operational Overhead | Reduced by 30% | Time tracking |
+**Rollback:** Reduce retention period, optimize batch sizes
+
+---
+
+#### Risk 4: Unknown Document Schema Changes
+**Severity:** Medium  
+**Probability:** Medium  
+
+**Mitigation:**
+- Comprehensive testing in staging
+- Schema validation in consumer
+- Graceful error handling for unexpected formats
+- DLQ for investigation
+
+**Rollback:** Fix consumer code, replay from DLQ
+
+---
+
+#### Risk 5: MongoDB Connection Issues
+**Severity:** High  
+**Probability:** Low  
+
+**Mitigation:**
+- Connection pooling with retry logic
+- Exponential backoff with jitter
+- Health checks and auto-restart
+- Multiple consumer instances for redundancy
+
+**Rollback:** Restart consumer, verify network connectivity
+
+---
+
+#### Risk 6: Consumer Crashes
+**Severity:** High  
+**Probability:** Low  
+
+**Mitigation:**
+- ECS auto-restart on failure
+- Health checks every 30 seconds
+- Structured error logging
+- PagerDuty alerts for crashes
+
+**Rollback:** Review logs, fix bug, redeploy
+
+---
+
+#### Risk 7: BI Dashboard Disruption
+**Severity:** High  
+**Probability:** Low  
+
+**Mitigation:**
+- Coordinate with BI team on migration schedule
+- Shadow mode validates data parity
+- Schedule migrations during low-usage periods
+- Have BI team validate after each cutover
+
+**Rollback:** Revert to trigger immediately, analyze discrepancy
+
+---
+
+#### Risk 8: Team Knowledge Gap
+**Severity:** Medium  
+**Probability:** Medium  
+
+**Mitigation:**
+- Training sessions before migration
+- Detailed runbooks
+- Pair programming during implementation
+- On-call rotation with experienced person
+
+**Rollback:** N/A (preventive only)
+
+---
+
+## Testing Strategy
+
+### Test Levels
+
+#### 1. Unit Tests
+**Coverage Target:** >80%
+
+**Key Areas:**
+- Document chunking logic
+- Resume token management
+- SQS message formatting
+- S3 key generation
+- Error handling
+
+**Tools:** Jest, Mocha, aws-sdk-mock, LocalStack
+
+---
+
+#### 2. Integration Tests
+**Environment:** Development
+
+**Scenarios:**
+- MongoDB → Change Stream → Kinesis
+- Kinesis → Consumer → S3 + SQS
+- End-to-end flow with all components
+- Error injection and recovery
+- Large document handling
+
+**Tools:** docker-compose, LocalStack (local AWS)
+
+---
+
+#### 3. Load Testing
+**Environment:** Staging
+
+**Scenarios:**
+- Baseline: Current production volume
+- Peak: 5x current volume
+- Sustained: 2x volume for 24 hours
+- Burst: 10x volume for 15 minutes
+
+**Metrics:**
+- Throughput (events/second)
+- Latency (p50, p95, p99)
+- Error rate
+- CPU/Memory utilization
+- Kinesis iterator age
+
+**Tools:** Artillery, k6, custom Node.js scripts
+
+---
+
+#### 4. Failure Testing (Chaos Engineering)
+**Environment:** Staging
+
+**Scenarios:**
+- **Consumer crash:** Kill ECS task mid-processing
+  - **Expected:** Auto-restart, resume from checkpoint
+- **Network partition:** Block MongoDB connection
+  - **Expected:** Retry with backoff, reconnect
+- **Kinesis throttling:** Inject throttle errors
+  - **Expected:** Exponential backoff, eventual success
+- **S3 unavailable:** Simulate S3 503 errors
+  - **Expected:** Retry, eventual success or DLQ
+- **Large document:** 10MB+ document change
+  - **Expected:** Proper chunking, all chunks written
+- **Duplicate events:** Replay same event
+  - **Expected:** Idempotency, no duplicate writes
+
+**Tools:** AWS Fault Injection Simulator, manual injection
+
+---
+
+#### 5. Data Validation Testing
+**Environment:** Staging & Production (shadow mode)
+
+**Validation Points:**
+- **S3 object count:** New system matches trigger count
+- **S3 object content:** Byte-by-byte comparison
+- **S3 key format:** Matches expected pattern
+- **SQS message count:** Matches expected
+- **SQS message content:** JSON structure validation
+- **Event ordering:** Per-document order maintained
+- **Deduplication:** No duplicate S3 files
+
+**Tools:** Custom Node.js validation scripts, AWS Athena queries
+
+---
+
+### Testing Checklist (Per Migration)
+
+**Pre-Cutover:**
+- [ ] Unit tests passing (>80% coverage)
+- [ ] Integration tests passing
+- [ ] Load test results meet requirements
+- [ ] Failure tests all passed
+- [ ] 72-hour shadow mode validation complete
+- [ ] Data parity confirmed (>99.9%)
+- [ ] Monitoring dashboards validated
+- [ ] Alerts tested and working
+- [ ] Rollback procedure documented and tested
+- [ ] Stakeholders notified
+
+**Post-Cutover:**
+- [ ] ETL pipeline functioning normally
+- [ ] BI dashboards showing current data
+- [ ] No increase in error rates
+- [ ] Latency within acceptable range
+- [ ] DLQ empty or only expected errors
+- [ ] CloudWatch metrics normal
+- [ ] Team trained on new system
+- [ ] Documentation updated
+
+---
+
+## Rollback Plan
+
+### Immediate Rollback Triggers
+
+Execute rollback immediately if:
+- Data loss detected (missing events)
+- Error rate >1% for 15 minutes
+- Processing lag >5 minutes for 30 minutes
+- Consumer crashes repeatedly (>3 in 30 min)
+- BI team reports data issues
+
+### Rollback Procedure
+
+**Time Estimate:** 15 minutes
+
+#### Step 1: Re-enable Trigger (2 minutes)
+```
+1. Log into MongoDB Atlas
+2. Navigate to Triggers
+3. Enable the disabled trigger for this collection
+4. Verify trigger is running (check logs)
+```
+
+#### Step 2: Disable New System (2 minutes)
+```
+1. Update ECS service desired count to 0 for Change Stream consumer
+2. Update ECS service desired count to 0 for Kinesis consumer
+3. Verify tasks have stopped
+```
+
+#### Step 3: Verify Data Flow (5 minutes)
+```
+1. Check trigger logs for new events
+2. Verify S3 writes from trigger
+3. Verify SQS messages from trigger
+4. Confirm ETL pipeline processing
+```
+
+#### Step 4: Communication (3 minutes)
+```
+1. Notify BI team of rollback
+2. Notify stakeholders
+3. Create incident ticket
+4. Schedule post-mortem
+```
+
+#### Step 5: Investigation (Ongoing)
+```
+1. Collect logs from all components
+2. Review CloudWatch metrics
+3. Check DLQ for errors
+4. Identify root cause
+5. Plan remediation
+```
+
+---
+
+### Rollback Testing
+
+**Before each migration:**
+- Test rollback procedure in staging
+- Verify trigger can be re-enabled quickly
+- Confirm no data loss during rollback
+- Document exact steps and timings
+
+---
+
+## Success Metrics
+
+### Key Performance Indicators (KPIs)
+
+#### Reliability
+- **Target:** 99.95% uptime
+- **Measurement:** CloudWatch metrics, uptime monitoring
+- **Baseline:** Current trigger reliability (unknown, establish in Phase 1)
+
+#### Latency
+- **Target:** <5 seconds (p95) from MongoDB change to S3 write
+- **Measurement:** Custom metrics in code, CloudWatch
+- **Baseline:** Current trigger latency (establish in Phase 1)
+
+#### Throughput
+- **Target:** Handle 10x current peak volume
+- **Measurement:** Events processed per second
+- **Baseline:** Current volume (establish in Phase 1)
+
+#### Data Accuracy
+- **Target:** 100% data parity (zero data loss)
+- **Measurement:** Automated validation scripts
+- **Baseline:** 100% (current trigger standard)
+
+#### Operational Efficiency
+- **Target:** <2 hours/week maintenance
+- **Measurement:** Time spent on operations
+- **Baseline:** Current (unknown, track in Phase 1)
+
+#### Cost
+- **Target:** <$1000/month total infrastructure
+- **Measurement:** AWS Cost Explorer
+- **Baseline:** Current trigger costs (unknown)
+
+---
+
+### Go/No-Go Criteria for Production
+
+Before BI Production Release:
+- [ ] All 7 triggers migrated successfully
+- [ ] Zero data loss in production migrations
+- [ ] Latency meets or beats trigger performance
+- [ ] 99.95% uptime over 2-week period
+- [ ] BI team validates data accuracy
+- [ ] Load testing passed at 10x volume
+- [ ] Failure testing passed all scenarios
+- [ ] Monitoring and alerting operational
+- [ ] Runbooks complete and tested
+- [ ] Team trained and confident
+- [ ] Post-migration review completed
+
+---
+
+## Timeline Summary
+
+| Phase | Duration | Activities | Deliverables |
+|-------|----------|------------|--------------|
+| **Phase 1** | 2 weeks | Investigation, POC, setup | POC code, infrastructure, baselines |
+| **Phase 2** | 4 weeks | Development, testing | Production code, tests, staging validation |
+| **Phase 3** | 4 weeks | Staged migration | All triggers migrated, monitoring |
+| **Post-Migration** | 2 weeks | Optimization, documentation | Final reports, optimizations |
+| **Total** | **12 weeks** | | **Production-ready stream processing** |
+
+---
+
 
 ## Appendix
 
-### A. Configuration Files
+### A. Kinesis Stream Configuration
 
-#### Kafka Cluster Configuration
-```properties
-# server.properties
-broker.id=1
-listeners=PLAINTEXT://0.0.0.0:9092
-log.dirs=/var/lib/kafka-logs
-num.partitions=3
-default.replication.factor=3
-min.insync.replicas=2
-log.retention.hours=72
+**Recommended Settings:**
+
+```yaml
+stream_name: <collection>-changes
+mode: ON_DEMAND
+retention_period: 24 # hours
+encryption: AWS_KMS
+enhanced_monitoring: shard_level
 ```
 
-#### Debezium Connector Configuration
+---
+
+### B. ECS Task Definitions
+
+**Change Stream Consumer:**
+```yaml
+family: change-stream-consumer
+cpu: 1024 # 1 vCPU
+memory: 2048 # 2 GB
+container_definitions:
+  - name: consumer
+    image: <ECR_URI>/change-stream-consumer:latest
+    environment:
+      - MONGODB_URI: <from_secrets>
+      - KINESIS_STREAMS: <from_config>
+      - LOG_LEVEL: INFO
+    log_configuration:
+      log_driver: awslogs
+```
+
+**Kinesis Consumer:**
+```yaml
+family: kinesis-consumer
+cpu: 2048 # 2 vCPU
+memory: 4096 # 4 GB
+container_definitions:
+  - name: consumer
+    image: <ECR_URI>/kinesis-consumer:latest
+    environment:
+      - S3_BUCKET: <from_config>
+      - SQS_QUEUE_URLS: <from_config>
+      - CHECKPOINT_TABLE: <dynamodb_table>
+    log_configuration:
+      log_driver: awslogs
+```
+
+---
+
+### C. IAM Policy Templates
+
+**Change Stream Consumer:**
 ```json
 {
-  "name": "mongodb-source",
-  "config": {
-    "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
-    "mongodb.hosts": "mongodb1:27017,mongodb2:27017,mongodb3:27017",
-    "mongodb.name": "production",
-    "database.include.list": "app_db",
-    "snapshot.mode": "initial",
-    "capture.mode": "change_streams_update_full",
-    "heartbeat.interval.ms": 10000,
-    "poll.interval.ms": 500,
-    "max.batch.size": 2048,
-    "max.queue.size": 8192,
-    "mongodb.ssl.enabled": true,
-    "mongodb.authsource": "admin",
-    "transforms": "unwrap,addPrefix",
-    "transforms.unwrap.type": "io.debezium.connector.mongodb.transforms.ExtractNewDocumentState",
-    "transforms.addPrefix.type": "org.apache.kafka.connect.transforms.RegexRouter",
-    "transforms.addPrefix.regex": "(.*)",
-    "transforms.addPrefix.replacement": "cdc.$1"
-  }
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:PutRecord",
+        "kinesis:PutRecords"
+      ],
+      "Resource": "arn:aws:kinesis:*:*:stream/*-changes"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:*:*:*"
+    }
+  ]
 }
 ```
 
-### B. Operational Runbooks
+**Kinesis Consumer:**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:GetRecords",
+        "kinesis:GetShardIterator",
+        "kinesis:DescribeStream",
+        "kinesis:ListShards"
+      ],
+      "Resource": "arn:aws:kinesis:*:*:stream/*-changes"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::<bucket>/dev/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage"
+      ],
+      "Resource": "arn:aws:sqs:*:*:*-etl-queue"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:*:*:table/kinesis-checkpoints"
+    }
+  ]
+}
+```
 
-#### Connector Restart Procedure
-1. Check connector status
-2. Stop connector gracefully
-3. Clear offset if needed
-4. Restart connector
-5. Validate data flow
-6. Monitor for 15 minutes
+---
 
-#### Lag Recovery Procedure
-1. Identify lagging consumer group
-2. Check for processing errors
-3. Scale up consumers if needed
-4. Monitor recovery progress
-5. Post-mortem if lag > 1 hour
+### D. Monitoring Dashboard Widgets
+
+**Key Metrics to Display:**
+
+1. **Stream Health**
+   - Iterator age
+   - Incoming records
+   - Incoming bytes
+
+2. **Consumer Health**
+   - Processing latency (p50, p95, p99)
+   - Success rate
+   - Error rate
+   - DLQ depth
+
+3. **Downstream Impact**
+   - S3 write rate
+   - SQS send rate
+   - ETL processing lag
+
+4. **Resource Utilization**
+   - ECS CPU/Memory
+   - Network throughput
+   - Kinesis shard count
+
+---
+
+### E. Runbook: Common Issues
+
+**Issue:** High iterator age (lag)
+**Cause:** Consumer not keeping up with stream
+**Solution:**
+1. Check consumer logs for errors
+2. Increase ECS task count
+3. Optimize batch processing
+4. Consider provisioned mode for Kinesis
+
+**Issue:** DLQ filling up
+**Cause:** Repeated processing failures
+**Solution:**
+1. Check DLQ messages for pattern
+2. Fix consumer bug if identified
+3. Manually replay after fix
+4. Update alerts if expected
+
+**Issue:** Consumer crashing
+**Cause:** Memory leak or unhandled exception
+**Solution:**
+1. Review CloudWatch logs
+2. Check ECS task health
+3. Restart task manually if needed
+4. Deploy fix if bug identified
+
+**Issue:** Data mismatch reported
+**Cause:** Various (investigate)
+**Solution:**
+1. Run validation script
+2. Check for missing S3 files
+3. Review Kinesis records
+4. Check for processing errors
+5. Escalate if needed
+
+---
 
 
 
-## Conclusion
-
-This implementation plan provides a comprehensive roadmap for transitioning from MongoDB triggers to a robust stream processing solution. The phased approach ensures minimal risk while delivering improved scalability, reliability, and observability required for BI production readiness.
-
-The key to success will be thorough testing, gradual migration, and close collaboration between teams. With proper execution, this solution will provide a solid foundation for future data processing needs.
+**Document Status:** DRAFT  
+**Last Updated:** 2025-11-01  
+**Next Review:** Before Phase 1 kickoff
