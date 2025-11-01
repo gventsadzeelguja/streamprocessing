@@ -58,19 +58,7 @@ MongoDB Change Event → Trigger Function → S3 (document chunks) → SQS Messa
    - Difficult to replay events or handle backpressure
    - Event ordering only within single document changes
 
-3. **Observability Gaps**
-   - Limited logging (10 log statements max)
-   - No detailed metrics on processing time, failures, or throughput
-   - Difficult to trace end-to-end data flow
-   - No alerting on processing delays
-
-4. **Operational Complexity**
-   - Code changes require manual deployment through Atlas UI
-   - No version control integration (mentioned but disabled)
-   - Testing in production environment is risky
-   - Difficult to debug issues in real-time
-
-5. **Cost Implications**
+3. **Cost Implications**
    - Trigger executions are metered by MongoDB Atlas
    - Inefficient for high-volume collections
    - Multiple S3 PUT operations for large documents
