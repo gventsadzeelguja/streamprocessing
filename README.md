@@ -4,7 +4,7 @@
 
 This document outlines a comprehensive plan to migrate from MongoDB database triggers to a dedicated stream processing solution for ETL operations. The migration aims to improve scalability, reliability, and observability while ensuring zero data loss during the transition.
 
-**Current State:** 8 MongoDB triggers across multiple collections handling change events and writing to S3/SQS  
+**Current State:** 7 MongoDB triggers across multiple collections handling change events and writing to S3/SQS  
 **Target State:** Robust stream processing architecture with improved monitoring and error handling  
 **Timeline:** 8-12 weeks (Investigation: 2 weeks, Implementation: 6-10 weeks)  
 **Technology Stack:** Node.js/TypeScript  
