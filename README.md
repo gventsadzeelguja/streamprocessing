@@ -1,7 +1,7 @@
 # MongoDB Atlas Trigger to Change Streams Transition Plan
 
 ## Current Architecture Analysis
-Your trigger currently:
+Trigger currently:
 - Monitors database changes (insert, update, delete, replace)
 - Processes documents and stores them in S3 (with chunking for large documents)
 - Sends notifications to SQS for downstream ETL processing
@@ -77,10 +77,10 @@ class ChangeStreamProcessor {
 - Compare S3 outputs and SQS messages
 
 #### Step 2: Feature Parity Checklist
-- [ ] All collection monitoring
-- [ ] Error handling and retries
-- [ ] Resume token persistence
-- [ ] Monitoring and alerting
+- All collection monitoring
+- Error handling and retries
+- Resume token persistence
+- Monitoring and alerting
 
 #### Step 3: Gradual Transition
 1. We want to start with low-traffic collections
