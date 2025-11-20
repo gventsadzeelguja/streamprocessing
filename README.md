@@ -360,6 +360,37 @@ async function loadResumeToken() {
 }
 ```
 
+We can store these tokens after successfully processing some change event for failure tolerance.
+This is not crucial functionality as the following graph shows the changes
+
+Timeline:
+---------
+10:00:00 - App processing events normally
+10:00:15 - Document A inserted
+10:00:30 - Document B updated
+10:00:45 - App crashes 💥
+10:00:50 - Document C inserted
+10:01:00 - Document D deleted
+10:01:30 - App restarts ✅
+10:01:35 - Change stream starts from 10:01:30
+10:02:00 - Document E inserted (processed ✓)
+
+Without resume tokens stored in the db:
+- Document A: ✓ Processed
+- Document B: ✓ Processed  
+- Document C: ❌ MISSED (app was down)
+- Document D: ❌ MISSED (app was down)
+- Document E: ✓ Processed
+
+With resume tokens stored in the db:
+- Document A: ✓ Processed
+- Document B: ✓ Processed (token saved after this)
+- Document C: ✓ Processed on restart (resumed from B's token)
+- Document D: ✓ Processed on restart
+- Document E: ✓ Processed
+
+
+
 ## Summary
 Transitioning from Atlas Triggers to Change Streams provides more control and flexibility but requires managing additional infrastructure. The migration should be gradual, with parallel running to ensure data consistency before full cutover.
 
