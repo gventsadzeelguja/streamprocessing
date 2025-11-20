@@ -330,7 +330,7 @@ Every change event that comes through this is what the data is going to look lik
 }
 ```
 
-What Happens Automatically vs. What We Need to Handle
+## What Happens Automatically vs. What We Need to Handle
 
 Automatic (MongoDB handles):
 
