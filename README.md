@@ -321,12 +321,14 @@ startChangeStream();
 ## Resume Tokens and important notes about them
 
 Every change event that comes through this is what the data is going to look like
+```
 {
   _id: { _data: 'some_base64_encoded_token' },  // This is the resume token
   operationType: 'insert',
   fullDocument: { ... },
   ns: { db: 'mydb', coll: 'mycoll' }
 }
+```
 
 What Happens Automatically vs. What We Need to Handle
 
