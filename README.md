@@ -393,6 +393,8 @@ With resume tokens stored in the db:
 - Document E: ✓ Processed
 ```
 
+Basically once the app comes back up we will be able to process the data again, however while app was crashed we wont be able to reprocess that data. It depends how crucial it is to have absolutely no data loss
+
 
 ## Summary
 Transitioning from Atlas Triggers to Change Streams provides more control and flexibility but requires managing additional infrastructure. The migration should be gradual, with parallel running to ensure data consistency before full cutover.
