@@ -1,4 +1,3 @@
-<img width="1383" height="336" alt="image" src="https://github.com/user-attachments/assets/9b506c9b-711c-42a7-86df-ba66711569ff" /># MongoDB Atlas Trigger to Change Streams Transition Plan
 
 ## Current Architecture Analysis
 Trigger currently:
