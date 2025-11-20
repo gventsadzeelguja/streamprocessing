@@ -313,10 +313,10 @@ startChangeStream();
 ```
 
 ###Key differences:
-Configuration: Replace context.functions.execute() and context.environment.values with environment variables
-Change Stream Setup: Added MongoDB client connection and change stream listener
-Error Handling: Added proper error handling for the stream
-Function Structure: Wrapped the logic in a processChangeEvent() function that gets called for each change event
+1. Configuration: Replace context.functions.execute() and context.environment.values with environment variables
+2. Change Stream Setup: Added MongoDB client connection and change stream listener
+3. Error Handling: Added proper error handling for the stream
+4. Function Structure: Wrapped the logic in a processChangeEvent() function that gets called for each change event
 
 
 
