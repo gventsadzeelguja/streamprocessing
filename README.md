@@ -369,18 +369,18 @@ Timeline:
 10:00:00 - App processing events normally
 10:00:15 - Document A inserted
 10:00:30 - Document B updated
-10:00:45 - App crashes 💥
+10:00:45 - App crashes 
 10:00:50 - Document C inserted
 10:01:00 - Document D deleted
-10:01:30 - App restarts ✅
+10:01:30 - App restarts 
 10:01:35 - Change stream starts from 10:01:30
 10:02:00 - Document E inserted (processed ✓)
 
 Without resume tokens stored in the db:
 - Document A: ✓ Processed
 - Document B: ✓ Processed  
-- Document C: ❌ MISSED (app was down)
-- Document D: ❌ MISSED (app was down)
+- Document C: MISSED (app was down)
+- Document D: MISSED (app was down)
 - Document E: ✓ Processed
 
 With resume tokens stored in the db:
