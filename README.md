@@ -89,15 +89,14 @@ class ChangeStreamProcessor {
 
 
 ### 4. Resume Token Management
+More on this later
 ```javascript
 // Implement persistent resume token storage
 class ResumeTokenManager {
   async saveToken(token) {
-    // Store in MongoDB or Redis
   }
   
   async getLastToken() {
-    // Retrieve for resuming after restart
   }
 }
 ```
@@ -319,6 +318,47 @@ startChangeStream();
 4. Function Structure: Wrapped the logic in a processChangeEvent() function that gets called for each change event
 
 
+## Resume Tokens and important notes about them
+
+Every change event that comes through this is what the data is going to look like
+{
+  _id: { _data: 'some_base64_encoded_token' },  // This is the resume token
+  operationType: 'insert',
+  fullDocument: { ... },
+  ns: { db: 'mydb', coll: 'mycoll' }
+}
+
+What Happens Automatically vs. What We Need to Handle
+
+Automatic (MongoDB handles):
+
+Generation: Resume tokens are automatically created for every change event
+Inclusion: Every change event includes its resume token in the _id field
+Oplog tracking: MongoDB tracks where each token points in the oplog
+
+Manual (We need to handle):
+
+Persistence: Saving resume tokens so you can resume after crashes/restarts
+
+How can we handle it?
+
+```javascript
+async function saveResumeToken(token) {
+    const metaDb = client.db('metadata');
+    await metaDb.collection('change_stream_state').updateOne(
+        { _id: 'my_change_stream' },
+        { $set: { resumeToken: token, lastUpdated: new Date() } },
+        { upsert: true }
+    );
+}
+
+async function loadResumeToken() {
+    const metaDb = client.db('metadata');
+    const doc = await metaDb.collection('change_stream_state')
+        .findOne({ _id: 'my_change_stream' });
+    return doc?.resumeToken;
+}
+```
 
 ## Summary
 Transitioning from Atlas Triggers to Change Streams provides more control and flexibility but requires managing additional infrastructure. The migration should be gradual, with parallel running to ensure data consistency before full cutover.
