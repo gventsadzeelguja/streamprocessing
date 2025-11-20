@@ -363,6 +363,7 @@ async function loadResumeToken() {
 We can store these tokens after successfully processing some change event for failure tolerance.
 This is not crucial functionality as the following graph shows the changes
 
+```
 Timeline:
 ---------
 10:00:00 - App processing events normally
@@ -388,7 +389,7 @@ With resume tokens stored in the db:
 - Document C: ✓ Processed on restart (resumed from B's token)
 - Document D: ✓ Processed on restart
 - Document E: ✓ Processed
-
+```
 
 
 ## Summary
