@@ -340,7 +340,7 @@ Oplog tracking: MongoDB tracks where each token points in the oplog
 
 Manual (We need to handle):
 
-Persistence: Saving resume tokens so you can resume after crashes/restarts
+Persistence: Saving resume tokens so we can resume after crashes/restarts
 
 How can we handle it?
 
