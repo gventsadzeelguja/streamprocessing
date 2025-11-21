@@ -54,7 +54,7 @@ class ChangeStreamProcessor {
   }
 
   async processChange(changeEvent) {
-    // Port your existing S3/SQS logic here
+    // Port existing S3/SQS logic here
     // Same chunking logic, same S3 structure
   }
 }
