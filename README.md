@@ -395,7 +395,7 @@ With resume tokens stored in the db:
 
 Basically once the app comes back up we will be able to process the data again based on the last token saved, however while app was crashed, if we dont have token persistence we wont be able to reprocess that data. It depends how crucial it is to have absolutely no data loss
 
+## Triggers
+As said, we will first start with owners and users triggers. We will monitor how it performs, handles errors and etc. Gradually we will replace other triggers as well. For the POC we can start with the owners_etl trigger and see how it will work with the streams.
 
-## Summary
-Transitioning from Atlas Triggers to Change Streams provides more control and flexibility but requires managing additional infrastructure. The migration should be gradual, with parallel running to ensure data consistency before full cutover.
 
