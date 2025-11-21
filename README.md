@@ -393,7 +393,7 @@ With resume tokens stored in the db:
 - Document E: ✓ Processed
 ```
 
-Basically once the app comes back up we will be able to process the data again, however while app was crashed we wont be able to reprocess that data. It depends how crucial it is to have absolutely no data loss
+Basically once the app comes back up we will be able to process the data again based on the last token saved, however while app was crashed, if we dont have token persistence we wont be able to reprocess that data. It depends how crucial it is to have absolutely no data loss
 
 
 ## Summary
